@@ -1,0 +1,26 @@
+[
+  {
+    "component": "jquery",
+    "version": "1.7.1",
+    "severity": "medium",
+    "cves": [
+      "CVE-2012-6708",
+      "CVE-2015-9251",
+      "CVE-2019-11358",
+      "CVE-2020-11023",
+      "CVE-2020-7656"
+    ],
+    "cwe": [
+      "CWE-1104",
+      "CWE-1321",
+      "CWE-64",
+      "CWE-79"
+    ],
+    "summary": "Selector interpreted as HTML; Versions of jQuery prior to 1.9.0 are vulnerable to Cross-Site Scripting (XSS). The load method fails to recognize and strip script tags containing whitespace in the closing tag (e.g. </script >), allowing enclosed script logic to execute and enabling attackers to run arbitrary JavaScript in a victim's browser.; 3rd party CORS request may execute",
+    "below": "1.9.0b1",
+    "detection": "filecontent",
+    "source_file": "vendor.min.js__9d94d8982f.js",
+    "origin_url": "https://target.tld/static/js/vendor.min.js",
+    "detector": "retire"
+  }
+]

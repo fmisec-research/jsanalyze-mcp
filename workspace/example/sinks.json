@@ -1,0 +1,40 @@
+[
+  {
+    "sink_class": "html",
+    "kind": "innerHTML",
+    "party": "first",
+    "tainted": true,
+    "taint_source": "location.hash",
+    "real_taint": true,
+    "lead": true,
+    "severity_hint": "high",
+    "confidence": "high",
+    "count": 1,
+    "occurrences": [
+      {
+        "file": "app.4f2a.js__6cb6251497.js",
+        "line": 31,
+        "source": "el.innerHTML = location.hash"
+      }
+    ]
+  },
+  {
+    "sink_class": "html",
+    "kind": "innerHTML",
+    "party": "first",
+    "tainted": false,
+    "taint_source": null,
+    "real_taint": false,
+    "lead": false,
+    "severity_hint": "info",
+    "confidence": "low",
+    "count": 1,
+    "occurrences": [
+      {
+        "file": "app.4f2a.js__6cb6251497.js",
+        "line": 33,
+        "source": "document.getElementById(\"out\").innerHTML = e.data"
+      }
+    ]
+  }
+]

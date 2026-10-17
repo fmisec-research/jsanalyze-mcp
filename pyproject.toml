@@ -1,0 +1,30 @@
+[project]
+name = "jsanalyze-mcp"
+version = "0.1.0"
+description = "MCP server for analyzing JavaScript captured in Burp Suite XML exports (jsluice-powered)."
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.3.0",
+]
+
+[project.optional-dependencies]
+# Decode brotli-encoded (Content-Encoding: br) responses — common for CDN-served JS.
+# gzip/deflate/chunked are handled with stdlib zlib and need nothing extra.
+brotli = ["brotli>=1.1.0"]
+
+# The core pipeline (parsers/analyzers/leads/formatters/utils) is pure stdlib and needs
+# NO third-party packages — only `server.py` imports `mcp` (and brotli is optional).
+# This keeps the pipeline smoke-testable with a bare `python3`.
+
+[project.scripts]
+jsanalyze-mcp = "jsanalyze.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

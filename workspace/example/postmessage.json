@@ -1,0 +1,19 @@
+[
+  {
+    "kind": "addEventListener",
+    "party": "first",
+    "origin_checked": false,
+    "reaches_sinks": [
+      "innerHTML"
+    ],
+    "wildcard_target": false,
+    "file": "app.4f2a.js__6cb6251497.js",
+    "line": 32,
+    "source": "window.addEventListener(\"message\", function(e) { document.getElementById(\"out\").innerHTML = e.data; })",
+    "pm_class": "postmessage-listener",
+    "lead": true,
+    "suggested_skill": "hunt-xss",
+    "severity_hint": "high",
+    "confidence": "medium"
+  }
+]

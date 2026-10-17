@@ -1,0 +1,9 @@
+/api/admin/users/promote
+/api/v0/legacy/export
+/api/v1/auth/login
+/api/v1/auth/reset-password
+/api/v1/profile/me
+/api/v2/users/me/settings
+/graphql
+https://api.target.tld/v1
+wss://api.target.tld/socket

@@ -1,0 +1,11 @@
+{
+  "framework": "jquery",
+  "version": "1.7.1",
+  "evidence": [
+    "jQuery",
+    "jquery"
+  ],
+  "candidates": {
+    "jquery": 5
+  }
+}

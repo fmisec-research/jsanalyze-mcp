@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<!DOCTYPE items [
+<!ELEMENT items (item*)>
+]>
+<items burpVersion="2024.9" exportTime="Fri Oct 17 10:00:00 GMT 2026">
+  <item>
+    <time>Fri Oct 17 10:00:00 GMT 2026</time>
+    <url><![CDATA[https://target.tld/static/js/app.4f2a.js]]></url>
+    <host ip="203.0.113.10">target.tld</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method><![CDATA[GET]]></method>
+    <path><![CDATA[/static/js/app.4f2a.js]]></path>
+    <extension>js</extension>
+    <request base64="true">R0VUIC9zdGF0aWMvanMvYXBwLjRmMmEuanMgSFRUUC8xLjENCkhvc3Q6IHRhcmdldC50bGQNCkFjY2VwdDogKi8qDQoNCg==</request>
+    <status>200</status>
+    <responselength>687</responselength>
+    <mimetype>script</mimetype>
+    <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2phdmFzY3JpcHQ7IGNoYXJzZXQ9dXRmLTgNClNlcnZlcjogbmdpbngNCkNvbnRlbnQtRW5jb2Rpbmc6IGd6aXANCkNvbnRlbnQtTGVuZ3RoOiA1NTUNCg0KH4sIAAAAAAAC/41S0W7aMBR971dEWR+C1MWlZevKhKa0pJAWCmqY2J6oiS+JIbGN7ZCmiH+fDe3WSpu0lyTOPeee63OutyhZoilnXmN75DgJZ0o7wThyOo6baS1UGyEsqK+xTEH7Oido03S/GugCdJJ5j8dbg96hUoFU6Hhr3xHZIS6J/dE8O388cbYF6IyTttsLJ+6uYdn4iXLlC66051oBhElB2UsbIXnBNbiGKXkObXdffGEedA+kTRPhUmco56mpvxEaj+KJOc85qdvObTy695WWlKV0UXvb8kTsGv8Y47WjBAX6o8BKVeYqtjUUmObvR0glFtk6/2/hdQmyfpV+d49TlEOKkxrBk+BSf7M+zCjpNN099hBLpUwqDCpnCvOYJyswQ1fqLwmpffFApYVtaHSSrGQrdfDZXIxB7i/V2/bBNJ7dhT9t8sFdFESj+GbUvb+/CH8Ew/EgdP8g48lDNA4tUK1mOd3ArAXX55f99aBeTrtYLvWk+UzEBUmCq+tueNPrvyH3hsE43otEzziuA7MirU+fL75cnuJ5QmCRZnS5ygvGxVoqXW72VDMsZQxkfzIcGG7OE2yX1s+wymy9oozwyseEhBtgekCVBgP33AKUwqldpd+LDvtNdxzCk7IwYN/YFuZgP6/qiHguL4137/TAJ1hjK2Sz2zU880Tog6N4KRMYYiFMxN8fBh2ktBksQUtjtBB+a3GGjct+gcXRL/wVXMpqAwAA</response>
+    <comment></comment>
+  </item>
+  <item>
+    <time>Fri Oct 17 10:00:00 GMT 2026</time>
+    <url><![CDATA[https://target.tld/static/js/widget.js]]></url>
+    <host ip="203.0.113.10">target.tld</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method><![CDATA[GET]]></method>
+    <path><![CDATA[/static/js/widget.js]]></path>
+    <extension>js</extension>
+    <request base64="true">R0VUIC9zdGF0aWMvanMvd2lkZ2V0LmpzIEhUVFAvMS4xDQpIb3N0OiB0YXJnZXQudGxkDQpBY2NlcHQ6ICovKg0KDQo=</request>
+    <status>200</status>
+    <responselength>222</responselength>
+    <mimetype>script</mimetype>
+    <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IHRleHQvamF2YXNjcmlwdA0KU2VydmVyOiBuZ2lueA0KQ29udGVudC1FbmNvZGluZzogYnINCkNvbnRlbnQtTGVuZ3RoOiAxMTQNCg0KG4UAAIzEOBbxgyqkQeM2U2UkSczsSPmcayn4OOWAvS0KAg/bLgfx+93GzlLBYacTSDzNYMCDFYwJ93OX0Uu6B2LePD4vFhVnDVEnGhnk6KdDKNgja5nrSTN/BMAZ6dJzUS6k0sY6H2LKpbY+gL3P/eEH</response>
+    <comment></comment>
+  </item>
+  <item>
+    <time>Fri Oct 17 10:00:00 GMT 2026</time>
+    <url><![CDATA[https://target.tld/static/js/vendor.min.js]]></url>
+    <host ip="203.0.113.10">target.tld</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method><![CDATA[GET]]></method>
+    <path><![CDATA[/static/js/vendor.min.js]]></path>
+    <extension>js</extension>
+    <request base64="true">R0VUIC9zdGF0aWMvanMvdmVuZG9yLm1pbi5qcyBIVFRQLzEuMQ0KSG9zdDogdGFyZ2V0LnRsZA0KQWNjZXB0OiAqLyoNCg0K</request>
+    <status>200</status>
+    <responselength>625</responselength>
+    <mimetype>script</mimetype>
+    <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2phdmFzY3JpcHQNClNlcnZlcjogbmdpbngNClRyYW5zZmVyLUVuY29kaW5nOiBjaHVua2VkDQoNCjMwDQovKiEgalF1ZXJ5IHYxLjcuMSB8IGpxdWVyeS5vcmcvbGljZW5zZSAqLwp2YXIgalENCjMwDQp1ZXJ5PWZ1bmN0aW9uKCl7fTtqUXVlcnkuZm49e2pxdWVyeToiMS43LjEifTsKZmUNCjMwDQp0Y2goIi9hcGkvdjIvdXNlcnMvbWUvc2V0dGluZ3MiKTsKY29uc3QgR0hfVE9LRU4NCjMwDQogPSAiZ2hwXzAxMjM0NTY3ODlhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCIjsNCjMwDQoKLy8jIHNvdXJjZU1hcHBpbmdVUkw9ZGF0YTphcHBsaWNhdGlvbi9qc29uO2Jhc2UNCjMwDQo2NCxleUoyWlhKemFXOXVJam9nTXl3Z0ltWnBiR1VpT2lBaWRtVnVaRzl5TG0xcGINCjMwDQppNXFjeUlzSUNKemIzVnlZMlZ6SWpvZ1d5SjNaV0p3WVdOck9pOHZMM055WXk5amINCjMwDQoyNW1hV2N1YW5NaVhTd2dJbk52ZFhKalpYTkRiMjUwWlc1MElqb2dXeUpsZUhCdmMNCjMwDQpuUWdZMjl1YzNRZ1JreEJSeUE5SUhSeWRXVTdYRzRpWFN3Z0ltNWhiV1Z6SWpvZ1cNCjFjDQoxMHNJQ0p0WVhCd2FXNW5jeUk2SUNJaWZRPT0KDQowDQoNCg==</response>
+    <comment></comment>
+  </item>
+  <item>
+    <time>Fri Oct 17 10:00:00 GMT 2026</time>
+    <url><![CDATA[https://target.tld/]]></url>
+    <host ip="203.0.113.10">target.tld</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method><![CDATA[GET]]></method>
+    <path><![CDATA[/]]></path>
+    <extension></extension>
+    <request base64="true">R0VUIC8gSFRUUC8xLjENCkhvc3Q6IHRhcmdldC50bGQNCkFjY2VwdDogKi8qDQoNCg==</request>
+    <status>200</status>
+    <responselength>174</responselength>
+    <mimetype>HTML</mimetype>
+    <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IHRleHQvaHRtbDsgY2hhcnNldD11dGYtOA0KU2VydmVyOiBuZ2lueA0KQ29udGVudC1MZW5ndGg6IDgwDQoNCjwhZG9jdHlwZSBodG1sPjxodG1sPjxoZWFkPjx0aXRsZT5UYXJnZXQ8L3RpdGxlPjwvaGVhZD48Ym9keT5oZWxsbzwvYm9keT48L2h0bWw+</response>
+    <comment></comment>
+  </item>
+</items>

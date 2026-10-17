@@ -1,0 +1,24 @@
+# --- target-derived recon is sensitive: publish ONLY the synthetic demo run ---
+workspace/*
+!workspace/example/
+
+# operator inputs & auth material (never commit)
+input/
+auth/
+
+# tool binaries — rebuilt by `/jsanalyze setup`
+bin/*
+!bin/.gitkeep
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# internal design notes — not published
+ARCHITECTURE.md
+struktur.md

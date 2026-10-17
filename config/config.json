@@ -1,0 +1,36 @@
+{
+  "jsluice_path": "/home/kali/go/bin/jsluice",
+  "jsluice_repo": "https://github.com/0xshdax/jsluice",
+  "jsluice_install_path": "github.com/0xshdax/jsluice/cmd/jsluice@latest",
+  "modes": [
+    "urls",
+    "secrets",
+    "sinks",
+    "postmessage",
+    "sourcemaps"
+  ],
+  "max_js_bytes": 5242880,
+  "per_file_timeout_sec": 60,
+  "mask_secrets_in_leads": true,
+  "optional_tools": {},
+  "allow_network": false,
+  "enrichers": {
+    "beautify": true,
+    "linkfinder": true,
+    "trufflehog": true,
+    "gitleaks": true,
+    "retire": true,
+    "sourcemaps": true,
+    "secretfinder": false
+  },
+  "tools": {
+    "js_beautify": "",
+    "linkfinder_script": "",
+    "trufflehog": "",
+    "gitleaks": "",
+    "retire": "",
+    "sourcemapper": "",
+    "unwebpack_sourcemap": "",
+    "secretfinder": ""
+  }
+}

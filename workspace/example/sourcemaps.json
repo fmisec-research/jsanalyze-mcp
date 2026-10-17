@@ -1,0 +1,17 @@
+[
+  {
+    "url": "https://target.tld/static/js/app.4f2a.js.map",
+    "kind": "sourceMappingURL",
+    "inline": false,
+    "recovered": false,
+    "from": "app.4f2a.js__6cb6251497.js",
+    "note": "external .map — fetch gated (allow_network=false)"
+  },
+  {
+    "url": "(inline)",
+    "kind": "inline",
+    "inline": true,
+    "recovered": true,
+    "from": "vendor.min.js__9d94d8982f.js"
+  }
+]
