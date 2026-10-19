@@ -81,6 +81,76 @@ _VERSION_RES: dict[str, list[re.Pattern]] = {
 }
 
 
+# --- framework-specific XSS / pollution gadgets (critique point 11) -----------
+# Each: how to find it, the lead class, skill, severity and the proof instruction.
+_ANGULAR_BYPASS_RE = re.compile(r"bypassSecurityTrust(?:Html|Script|Style|Url|ResourceUrl)\s*\(")
+_PROTO_LODASH_RE = re.compile(r"(?<![\w$])(?:_|lodash)\s*\.\s*(merge|mergeWith|defaultsDeep|setWith|set)\s*\(")
+_PROTO_JQ_RE = re.compile(r"\$\s*\.\s*extend\s*\(\s*(?:!0|true)\b")
+_NEXT_DATA_RE = re.compile(r"__NEXT_DATA__")
+_JSURI_RE = re.compile(
+    r"""(?:href|src|xlink:href|formaction|action)\b[^;\n{}]{0,40}?javascript:""", re.I)
+_JSURI_DYNAMIC = re.compile(r"""javascript:['"`]?\s*(?:\+|\$\{)|(?:\+|\$\{)[^;\n]{0,20}javascript:""")
+
+
+def _scan_gadgets(text: str, party: str, base: str) -> list:
+    """Find framework DOM-XSS / prototype-pollution gadgets in one file's text.
+
+    Conservative + LOW confidence: a gadget is a *lead*, never a finding — it still
+    needs the usual reachability proof (is the argument attacker-controlled?)."""
+    out = []
+
+    def add(cls, skill, gadget, sev, m, title, nxt, neg, exp, conf="low"):
+        line = text.count("\n", 0, m.start()) + 1
+        out.append({
+            "cls": cls, "suggested_skill": skill, "gadget": gadget, "severity_hint": sev,
+            "confidence": conf, "party": party, "file": base, "line": line,
+            "evidence": " ".join(text[m.start():m.start() + 100].split()),
+            "title": title, "next_step": nxt, "negative_control": neg, "experiment": exp,
+        })
+
+    for m in _ANGULAR_BYPASS_RE.finditer(text):
+        add("framework-gadget", "hunt-xss", "angular-bypass-security", "medium", m,
+            "Angular sanitization bypass (bypassSecurityTrust*)",
+            "Angular explicitly disables sanitization here — if the argument is attacker-"
+            "controlled this is DOM-XSS. Trace the value back to a source. (hunt-xss)",
+            "A trusted-constant argument is safe; only an attacker-controlled one executes.",
+            "Trace the bypassSecurityTrust* argument to a user source; if reachable, inject and confirm execution.")
+    for m in _PROTO_LODASH_RE.finditer(text):
+        add("framework-gadget", "hunt-server-side", "prototype-pollution", "medium", m,
+            f"Prototype-pollution sink (lodash .{m.group(1)})",
+            "A deep-merge/set with an attacker-controlled object can pollute Object.prototype — "
+            "confirm the merged object is user-derived AND the lodash version is vulnerable "
+            "(see libs.json) before claiming impact. (hunt-server-side)",
+            "A merge of only trusted/own objects is not pollution; a non-vulnerable lodash is not exploitable.",
+            'Send a payload with a "__proto__" key into the merged object and check for a polluted global property.')
+    for m in _PROTO_JQ_RE.finditer(text):
+        add("framework-gadget", "hunt-server-side", "prototype-pollution", "medium", m,
+            "Prototype-pollution sink (jQuery deep $.extend(true,…))",
+            "jQuery deep extend with attacker input can pollute Object.prototype — confirm the "
+            "source object is user-derived and jQuery is a vulnerable version. (hunt-server-side)",
+            "A deep extend of trusted objects is safe.",
+            'Feed a "__proto__"/"constructor.prototype" key into the extended object and check for pollution.')
+    nd = _NEXT_DATA_RE.search(text)
+    if nd:
+        add("framework-gadget", "hunt-js-analysis", "next-data-island", "low", nd,
+            "Next.js __NEXT_DATA__ hydration island",
+            "The server-rendered __NEXT_DATA__ JSON hydrates the app — check whether it reflects "
+            "user-influenced values that then flow to a sink (indirect DOM-XSS / client trust). (hunt-js-analysis)",
+            "Data that never reflects attacker input is not a vector.",
+            "Diff __NEXT_DATA__ with a user-controlled query/profile value; see if it lands in a sink on hydration.")
+    # dynamic javascript: URI (skip the benign javascript:void(0)/; literals)
+    for m in _JSURI_RE.finditer(text):
+        tail = text[m.end():m.end() + 30]
+        if _JSURI_DYNAMIC.search(text[m.start():m.end() + 30]) and "void(0)" not in tail:
+            add("framework-gadget", "hunt-xss", "javascript-uri", "medium", m,
+                "Dynamic javascript: URI sink",
+                "A javascript: URI built from a variable in an href/src is script execution if the "
+                "value is attacker-controlled. (hunt-xss)",
+                "A static javascript:void(0) is inert; only a dynamic, attacker-influenced URI runs.",
+                "Control the concatenated part of the javascript: URI and confirm execution on click/navigation.")
+    return out
+
+
 def _find_version(framework: str, text: str) -> str:
     for rx in _VERSION_RES.get(framework, []):
         try:
@@ -133,6 +203,7 @@ def detect_framework(items, cfg=None) -> dict:
         counts: dict[str, int] = {fw: 0 for fw in _MARKERS}
         seen_markers: set = set()
         versions: dict[str, str] = {}
+        gadgets: list = []
 
         for item in (items or []):
             try:
@@ -141,12 +212,18 @@ def detect_framework(items, cfg=None) -> dict:
                     continue
                 url = getattr(item, "url", "") or ""
                 base = os.path.basename(saved_path)
-                if party_of(base, url, scope_hosts) == "third":
+                party = party_of(base, url, scope_hosts)
+                if party == "third":
                     continue  # count first-party + vendor only
                 with open(saved_path, "r", encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
             except Exception:
                 continue
+
+            try:
+                gadgets.extend(_scan_gadgets(text, party, base))
+            except Exception:
+                pass
 
             for fw, markers in _MARKERS.items():
                 fw_hit = False
@@ -172,6 +249,7 @@ def detect_framework(items, cfg=None) -> dict:
             "version": version,
             "evidence": _evidence(seen_markers),
             "candidates": candidates,
+            "gadgets": gadgets,
         }
     except Exception:
         return unknown

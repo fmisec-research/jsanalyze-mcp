@@ -10,10 +10,15 @@ Each kept row is one normalized endpoint; `EXPR` is kept with `dynamic:true`.
 
 from __future__ import annotations
 
+import os
 import re
 from urllib.parse import urlsplit
 
+from jsanalyze.analyzers.callsites import request_shape
 from jsanalyze.party import is_library_comment_url, party_of
+from jsanalyze.utils.normalize import (
+    ASSET_PREFIX, SPA_ROUTE, classify_string_kind, endpoint_key, normalize_path,
+)
 
 _MIME_RE = re.compile(r"^[a-z]+/[a-z0-9][a-z0-9.+\-]*\*?$", re.I)      # audio/mpeg, application/json
 _DATE_RE = re.compile(r"(?i)\b(MM|DD|YYYY|HH|SS|yyyy|dd)\b|^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$")
@@ -95,8 +100,20 @@ def _in_scope(host: str, scope_hosts) -> bool:
     return any(host == s or host.endswith("." + s) for s in scope)
 
 
-def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None) -> list[dict]:
+def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
+                        route_paths=None, history=None) -> list[dict]:
+    """Normalize jsluice/linkfinder url rows into endpoints.
+
+    ``route_paths`` (normalized SPA route paths) lets a string that is really a
+    client route be tagged ``string_kind=route`` instead of a bogus API endpoint
+    (critique point 3). ``history`` (from :func:`collect_history`) lets each endpoint
+    carry ``seen_in_history`` — the untested-surface signal (critique point 2).
+    """
     path_to_url = {it.saved_path: it.url for it in (items or []) if getattr(it, "saved_path", None)}
+    text_by_base = _text_index(items)
+    route_set = {normalize_path(p) for p in (route_paths or [])}
+    hist_keys = (history or {}).get("keys") if isinstance(history, dict) else None
+    hist_known = bool((history or {}).get("known")) if isinstance(history, dict) else False
     by_key, order = {}, []
     for rec in url_records or []:
         if not isinstance(rec, dict):
@@ -117,42 +134,131 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None) -> list[
         filename = rec.get("filename") or ""
         src_file = rec.get("source_file") or (filename.rsplit("/", 1)[-1] if filename else "")
         origin = rec.get("origin_url") or path_to_url.get(filename)
+        call_type = rec.get("type") or ""
+        method = _method_of(rec)
+        body_keys = [b for b in (rec.get("bodyParams") or []) if isinstance(b, str)]
+
+        # augment the request shape jsluice missed (JSON.stringify bodies etc.).
+        # jsluice `urls` rows carry NO line, so locate the call site by the URL literal
+        # in the file text, then read the options/body object there (critique point 3).
+        line = rec.get("line")
+        if (not body_keys or not method) and src_file in text_by_base:
+            text = text_by_base[src_file]
+            loc_line = line or _locate_line(text, url, path)
+            if loc_line:
+                shape2 = request_shape(text, loc_line)
+                method = method or shape2.get("method", "")
+                if not body_keys:
+                    body_keys = shape2.get("body_keys", [])
+
+        npath = normalize_path(path)
+        is_route = npath in route_set
+        string_kind = classify_string_kind(url, call_type, is_route=is_route)
 
         norm = {
-            "method": _method_of(rec),
+            "method": method,
             "path": path,
+            "norm_path": npath,
             "host": host,
             "query": query,
-            "body_keys": [b for b in (rec.get("bodyParams") or []) if isinstance(b, str)],
-            "call_type": rec.get("type") or "",
-            "where_found": f"{src_file}:{rec.get('line')}" if rec.get("line") else src_file,
+            "body_keys": body_keys,
+            "call_type": call_type,
+            "string_kind": string_kind,
+            "where_found": f"{src_file}:{line}" if line else src_file,
             "party": party_of(src_file, origin or "", scope_hosts),
             "in_scope": _in_scope(host, scope_hosts),
             "dynamic": "EXPR" in url,
-            "fetchable": kind in ("absolute", "rooted"),
+            "fetchable": kind in ("absolute", "rooted") and string_kind != SPA_ROUTE,
             "detector": rec.get("detector") or "jsluice",
             "url": url,
         }
+        if hist_known:
+            ek = endpoint_key(method, host, path, call_type=call_type)
+            norm["seen_in_history"] = ek in hist_keys
         # collapse method/type variants of the same endpoint into ONE row, preferring
         # the variant that carries an HTTP method / body (critique point 1/2 dedupe).
-        key = (norm["host"], norm["path"])
+        key = (norm["host"], norm["norm_path"])
         prev = by_key.get(key)
         if prev is None:
             by_key[key] = norm
             order.append(key)
-        elif not prev.get("method") and norm.get("method"):
-            prev["method"] = norm["method"]
-            prev["call_type"] = norm["call_type"] or prev["call_type"]
-            prev["body_keys"] = norm["body_keys"] or prev["body_keys"]
+        else:
+            if not prev.get("method") and norm.get("method"):
+                prev["method"] = norm["method"]
+            prev["call_type"] = prev["call_type"] or norm["call_type"]
+            prev["body_keys"] = prev["body_keys"] or norm["body_keys"]
+            # a real call site upgrades a bare string-literal row to API
+            if norm["string_kind"] == "api" and prev["string_kind"] != "api":
+                prev["string_kind"] = "api"
+            prev["fetchable"] = prev["fetchable"] or norm["fetchable"]
+            if norm.get("seen_in_history"):
+                prev["seen_in_history"] = True
     return [by_key[k] for k in order]
+
+
+def _locate_line(text: str, url: str, path: str) -> "int | None":
+    """1-based line of the call that mentions this endpoint, found by the URL literal.
+
+    Tries the full URL, then the path, then the static prefix before an ``EXPR``
+    placeholder (``/orders/EXPR`` -> search ``/orders/``) — enough to land request_shape
+    on the right call site when jsluice gave no line."""
+    for needle in _locators(url, path):
+        if not needle or len(needle) < 3:
+            continue
+        idx = text.find(needle)
+        if idx != -1:
+            return text.count("\n", 0, idx) + 1
+    return None
+
+
+def _locators(url: str, path: str):
+    out = []
+    if url:
+        out.append(url)
+    if path and path != "/":
+        out.append(path)
+        if "EXPR" in path:
+            out.append(path.split("EXPR", 1)[0])
+    return out
+
+
+def _text_index(items) -> dict:
+    """basename -> file text, read once (for call-site body-shape recovery)."""
+    out: dict = {}
+    for it in (items or []):
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        base = os.path.basename(sp)
+        if base in out:
+            continue
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                out[base] = fh.read()
+        except OSError:
+            continue
+    return out
 
 
 def classify_endpoint(norm: dict):
     """Lead class for a normalized endpoint, or None. Segment-based (no substrings);
-    IDOR only for a real resource/{id} position or id-ish param (not just 'a number')."""
+    IDOR only for a real resource/{id} position or id-ish param (not just 'a number').
+
+    Gated by ``string_kind`` (critique point 3): a client-side SPA route or an asset
+    prefix is NOT an API endpoint, so it never becomes an auth/bfla/idor lead here
+    (a privileged route is surfaced as ``endpoint-hidden`` via the routes path instead)."""
+    if norm.get("string_kind") in (ASSET_PREFIX, SPA_ROUTE):
+        return None
     path = (norm.get("path") or "")
+    url = (norm.get("url") or "")
+    call_type = (norm.get("call_type") or "").lower()
     segs = [s for s in path.lower().split("/") if s]
     params = {p.lower() for p in (norm.get("query") or []) + (norm.get("body_keys") or [])}
+
+    # realtime channel -> hunt-websocket (critique point 9)
+    if url.lower().startswith(("ws://", "wss://")) or call_type in ("websocket", "eventsource") \
+            or "websocket" in segs or "socket.io" in url.lower():
+        return ("websocket", "hunt-websocket", "medium", "medium", "realtime channel (ws/sse)")
 
     if any(s in _BFLA_SEGS for s in segs):
         return ("bfla-candidate", "hunt-api", "medium", "high", "privileged path segment")

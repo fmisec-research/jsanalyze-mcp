@@ -22,8 +22,8 @@ import jsanalyze.server as S
 FULL_SECRETS = ["AKIAIOSFODNN7EXAMPLE", "sk_live_4eC39HqLyjWDarjtT1zdp7dcABCDEFGH"]
 ARTIFACTS = ["endpoints.json", "sinks.json", "postmessage.json", "secrets.json", "libs.json",
              "graphql.json", "flags.json", "routes.json", "storage.json", "chunks.json",
-             "sourcemaps.json", "framework.json", "leads.json", "issues.json",
-             "endpoints.txt", "report.md"]
+             "sourcemaps.json", "framework.json", "csp.json", "history.json", "source_notes.json",
+             "leads.json", "issues.json", "endpoints.txt", "report.md"]
 
 
 def main() -> int:
@@ -44,6 +44,12 @@ def main() -> int:
         print(f"[*] leads={len(leads)} classes={sorted(classes)}")
         assert {"xss-sink", "postmessage-listener", "bfla-candidate", "secret-location",
                 "vulnerable-library"} <= classes, f"missing core classes: {classes}"
+        # v2: every lead carries a composite score and the queue is ordered by it (desc)
+        assert all("score" in l for l in leads), "leads missing v2 score"
+        scores = [float(l["score"]) for l in leads]
+        assert scores == sorted(scores, reverse=True), "leads not ordered by score"
+        assert not leads[0]["class"].startswith("postmessage"), \
+            "a postMessage listener is top of queue (scoring regression)"
         # BFLA deduped to one despite method variants
         assert sum(1 for l in leads if l["class"] == "bfla-candidate") == 1
         # the tainted innerHTML is the sink lead

@@ -43,35 +43,44 @@ def _hosts(items, tri):
 
 def _counts(items, tri, leads):
     ep_f = sum(1 for n in tri.endpoints if n.get("fetchable"))
+    unver = sum(1 for n in tri.endpoints if n.get("seen_in_history") is False)
     sink_l = sum(1 for c in tri.sinks if c.get("lead"))
     pm_l = sum(1 for r in tri.postmessage if r.get("lead"))
-    return (f"JS: {len(items or [])} | Endpoints: {ep_f} fetchable/{len(tri.endpoints)} | "
+    miss = sum(1 for c in tri.chunks if c.get("present") is False)
+    return (f"JS: {len(items or [])} | Endpoints: {ep_f} fetchable/{len(tri.endpoints)}"
+            f"{f' ({unver} not in traffic)' if unver else ''} | "
             f"Sinks: {sink_l} lead/{len(tri.sinks)} | Secrets: {len(tri.secrets)} | "
             f"Vuln libs: {len(tri.libs)} | postMessage: {pm_l} lead/{len(tri.postmessage)} | "
             f"Flags: {len(tri.flags)} | Routes: {len(tri.routes)} | Storage: {len(tri.storage)} | "
-            f"GraphQL: {len(tri.graphql)} | Leads: {len(leads or [])}")
+            f"GraphQL: {len(tri.graphql)} | CSP hosts: {len(tri.csp)} | "
+            f"Missing chunks: {miss} | Source notes: {len(tri.notes)} | Leads: {len(leads or [])}")
 
 
 def _lead_rank(ld):
-    return (_SEV.get(ld.get("severity_hint"), 9), _CONF.get(ld.get("confidence"), 9))
+    return (-float(ld.get("score") or 0), _SEV.get(ld.get("severity_hint"), 9),
+            _CONF.get(ld.get("confidence"), 9))
 
 
 def _leads_section(leads):
     if not leads:
         return "_none_"
-    groups, order = {}, []
-    for ld in sorted(leads, key=_lead_rank):
-        s = ld.get("suggested_skill") or "map-app"
-        if s not in groups:
-            groups[s] = []; order.append(s)
-        groups[s].append(ld)
     out = []
-    for s in sorted(order, key=lambda k: (-len(groups[k]), k)):
-        out.append(f"### {s}")
-        for ld in groups[s]:
-            loc = f" — {ld.get('source_file')}:{ld.get('line')}" if ld.get("source_file") else ""
-            out.append(f"- [{ld['id']}] **{ld['class']}** ({ld.get('confidence')}/{ld.get('severity_hint')}) "
-                       f"— `{_inline(ld.get('evidence'))[:90]}`{loc} → {_inline(ld.get('next_step'))}")
+    for ld in sorted(leads, key=_lead_rank):
+        loc = f" — {ld.get('source_file')}:{ld.get('line')}" if ld.get("source_file") else ""
+        out.append(
+            f"- [{ld['id']}] **{ld['class']}** score={ld.get('score')} "
+            f"({ld.get('confidence')}/{ld.get('severity_hint')} → {ld.get('suggested_skill')}) "
+            f"— `{_inline(ld.get('evidence'))[:90]}`{loc}")
+        if ld.get("caller_chain"):
+            out.append(f"    - chain: {_inline(' ⇐ '.join(str(c) for c in ld['caller_chain']))[:140]}")
+        if ld.get("body_keys"):
+            out.append(f"    - body: {{{', '.join(ld['body_keys'][:12])}}}")
+        if ld.get("seen_in_history") is False:
+            out.append("    - ⚠ not in captured traffic (untested surface)")
+        if ld.get("experiment"):
+            out.append(f"    - experiment: {_inline(ld['experiment'])[:200]}")
+        if ld.get("negative_control"):
+            out.append(f"    - neg-control: {_inline(ld['negative_control'])[:160]}")
     return "\n".join(out)
 
 
@@ -161,10 +170,16 @@ def _other_section(tri):
         _mini_list("GraphQL ops", tri.graphql,
                    lambda g: f"{g.get('operation')} {g.get('operationName')} vars={g.get('variables')} {g.get('file')}:{g.get('line')}"),
     ]
+    if tri.csp:
+        parts.append(_mini_list("CSP hosts (connect/frame-src)", tri.csp,
+                                 lambda d: f"{d.get('directive')} {d.get('source')} (host {d.get('host')})"))
+    if tri.notes:
+        parts.append(_mini_list("Source notes (recovered)", tri.notes,
+                                 lambda n: f"[{n.get('category')}] {n.get('text')} — {n.get('file')}:{n.get('line')}"))
     missing = [c for c in tri.chunks if c.get("present") is False]
     if missing:
-        parts.append(_mini_list("Missing chunks (operator must capture)", missing,
-                                 lambda c: f"{c.get('src') or c.get('file') or c.get('id')}"))
+        parts.append(_mini_list("Missing chunks (operator must capture — NOT fetched)", missing,
+                                 lambda c: f"{c.get('url') or c.get('src') or c.get('file') or c.get('id')}"))
     return "\n\n".join(parts)
 
 
@@ -226,15 +241,17 @@ def report_summary(run, items, tri, leads, issues=None) -> str:
         f"# JS Analysis — {_hosts(items, tri)} ({getattr(run, 'run_id', '?')})",
         _counts(items, tri, leads),
         f"Workspace: {getattr(run, 'dir', '')}",
-        "Artefak: endpoints·sinks·postmessage·secrets·libs·graphql·flags·routes·storage·chunks·sourcemaps .json, leads.json, report.md",
+        "Artefak: endpoints·sinks·postmessage·secrets·libs·graphql·flags·routes·storage·chunks·"
+        "sourcemaps·csp·history·source_notes .json, leads.json, report.md",
     ]
     if issues:
         lines.append(f"⚠ issues: {len(issues)} (issues.json) — e.g. {_inline(issues[0])[:100]}")
     top = sorted(leads or [], key=_lead_rank)[:6]
     if top:
-        lines.append("Top leads:")
+        lines.append("Top leads (by score):")
         for ld in top:
-            lines.append(f"- [{ld['id']}] {ld['class']} {ld.get('confidence')}/{ld.get('severity_hint')} "
+            lines.append(f"- [{ld['id']}] score={ld.get('score')} {ld['class']} "
+                         f"{ld.get('confidence')}/{ld.get('severity_hint')} "
                          f"→ {ld.get('suggested_skill')} — {_inline(ld.get('evidence'))[:60]}")
     else:
         lines.append("Top leads: none (review endpoints/sinks/routes artifacts)")

@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from jsanalyze import setup as _setup
 from jsanalyze.analyzers.chunks import map_chunks
+from jsanalyze.analyzers.comment_miner import mine_comments
 from jsanalyze.analyzers.endpoints import normalize_endpoints
 from jsanalyze.analyzers.flags import scan_flags
 from jsanalyze.analyzers.framework import detect_framework
@@ -40,12 +41,15 @@ from jsanalyze.analyzers.storage import scan_storage
 from jsanalyze.enrichers import tools as _tools
 from jsanalyze.enrichers.beautify import beautify_dir
 from jsanalyze.enrichers.endpoints import linkfinder_endpoints
+from jsanalyze.enrichers.secret_classify import classify_secrets
 from jsanalyze.enrichers.secrets import scan_secrets
 from jsanalyze.enrichers.sourcemaps import recover_sources
 from jsanalyze.enrichers.vulnlibs import scan_libs
 from jsanalyze.formatters.report_builder import build_report, report_summary
 from jsanalyze.leads.lead_engine import build_leads
 from jsanalyze.models import Item, Triaged
+from jsanalyze.parsers.csp import collect_csp
+from jsanalyze.parsers.history import collect_history
 from jsanalyze.parsers.inputs import load_input
 from jsanalyze.utils import workspace as W
 
@@ -56,7 +60,8 @@ _ARTIFACTS = {
     "endpoints": "endpoints.json", "sinks": "sinks.json", "postmessage": "postmessage.json",
     "secrets": "secrets.json", "libs": "libs.json", "graphql": "graphql.json",
     "flags": "flags.json", "routes": "routes.json", "storage": "storage.json",
-    "chunks": "chunks.json", "sourcemaps": "sourcemaps.json",
+    "chunks": "chunks.json", "sourcemaps": "sourcemaps.json", "csp": "csp.json",
+    "notes": "source_notes.json",
 }
 
 
@@ -67,26 +72,6 @@ def _safe(label, fn, issues, default):
     except Exception as e:  # noqa: BLE001 — a bad enricher must not sink the run, but it IS reported
         issues.append(f"{label}: {type(e).__name__}: {e}")
         return default
-
-
-def _secret_value(rec):
-    data = rec.get("data") if isinstance(rec, dict) else None
-    if isinstance(data, dict):
-        vals = [v for v in data.values() if isinstance(v, str)]
-        return max(vals, key=len) if vals else None
-    return None
-
-
-def _dedupe_secrets(records):
-    seen, out = set(), []
-    for r in records:
-        v = _secret_value(r)
-        if v is not None and v in seen:
-            continue
-        if v is not None:
-            seen.add(v)
-        out.append(r)
-    return out
 
 
 # --- tools --------------------------------------------------------------------
@@ -165,25 +150,39 @@ def analyze(
         tool_secrets += _safe("secrets(sources)", lambda: scan_secrets(src_dir, src_items, cfg=cfg), issues, [])
     libs = _safe("retire", lambda: scan_libs(run.js_dir, all_items, cfg=cfg), issues, [])
 
+    # request history already in the capture (point 2) and SPA routes are computed
+    # FIRST so the endpoint normalizer can (a) flag untested surface and (b) tell a
+    # client route apart from an API call.
+    history = _safe("history", lambda: collect_history(p, scope_hosts), issues,
+                    {"known": False, "keys": set(), "entries": [], "count": 0})
+    csp = _safe("csp", lambda: collect_csp(p, scope_hosts), issues,
+                {"known": False, "policies": [], "directives": []})
+    routes = _safe("routes", lambda: extract_routes(all_items, cfg=cfg), issues, [])
+    route_paths = [r.get("path") for r in routes if r.get("path")]
+
     tri = Triaged(
-        endpoints=_safe("endpoints", lambda: normalize_endpoints(list(a.urls) + extra_urls, all_items, cfg, scope_hosts), issues, []),
+        endpoints=_safe("endpoints", lambda: normalize_endpoints(
+            list(a.urls) + extra_urls, all_items, cfg, scope_hosts,
+            route_paths=route_paths, history=history), issues, []),
         sinks=_safe("sinks", lambda: triage_sinks(a.sinks, all_items, cfg, scope_hosts), issues, []),
         postmessage=_safe("postmessage", lambda: classify_postmessage(a.postmessage, all_items, cfg, scope_hosts), issues, []),
-        secrets=_dedupe_secrets(list(a.secrets) + tool_secrets),
+        secrets=classify_secrets(list(a.secrets) + tool_secrets),
         libs=libs,
         graphql=_safe("graphql", lambda: extract_graphql(all_items, cfg=cfg), issues, []),
         flags=_safe("flags", lambda: scan_flags(all_items, cfg=cfg), issues, []),
-        routes=_safe("routes", lambda: extract_routes(all_items, cfg=cfg), issues, []),
+        routes=routes,
         storage=_safe("storage", lambda: scan_storage(all_items, cfg=cfg), issues, []),
         chunks=(_safe("chunks", lambda: map_chunks(all_items, cfg=cfg), issues, [])
                 + [{"src": r["src"], "from": r.get("from"), "present": r.get("present"), "kind": "html-ref"}
                    for r in (chunk_refs or [])]),
         framework=_safe("framework", lambda: detect_framework(all_items, cfg=cfg), issues, {}),
         sourcemaps=sm.get("refs", []),
+        csp=csp.get("directives", []),
+        notes=_safe("source_notes", lambda: mine_comments(src_items), issues, []),
         issues=issues,
     )
 
-    leads = build_leads(tri, cfg=cfg)
+    leads = build_leads(tri, cfg=cfg, history=history, scope_hosts=scope_hosts)
 
     # write artifacts
     for field, fname in _ARTIFACTS.items():
@@ -191,6 +190,10 @@ def analyze(
     W.write_json(run.dir / "framework.json", tri.framework)
     W.write_json(run.dir / "leads.json", leads)
     W.write_json(run.dir / "issues.json", issues)
+    W.write_json(run.dir / "history.json", {
+        "known": history.get("known", False), "count": history.get("count", 0),
+        "hosts": history.get("hosts", []), "entries": history.get("entries", []),
+    })
     fetchable = sorted({n["path"] if not n.get("host") else n["url"]
                         for n in tri.endpoints if n.get("fetchable")})
     W.write_text(run.dir / "endpoints.txt", "\n".join(fetchable) + ("\n" if fetchable else ""))
@@ -281,8 +284,10 @@ def leads(run: str, cls: str | None = None, party: str | None = None,
     lines = [f"## Leads — {run} ({len(out)}/{len(items)})"]
     for ld in out:
         loc = f" @ {ld.get('source_file')}:{ld.get('line')}" if ld.get("source_file") else ""
-        lines.append(f"- [{ld['id']}] **{ld['class']}** ({ld.get('confidence')}/{ld.get('severity_hint')}) "
-                     f"→ {ld.get('suggested_skill')} — `{(ld.get('evidence') or '')[:80]}`{loc}")
+        hist = " ⚠not-in-traffic" if ld.get("seen_in_history") is False else ""
+        lines.append(f"- [{ld['id']}] score={ld.get('score')} **{ld['class']}** "
+                     f"({ld.get('confidence')}/{ld.get('severity_hint')}) "
+                     f"→ {ld.get('suggested_skill')} — `{(ld.get('evidence') or '')[:80]}`{loc}{hist}")
     return "\n".join(lines)
 
 

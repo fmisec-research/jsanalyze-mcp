@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+from urllib.parse import urljoin, urlsplit
 
 __all__ = ["map_chunks"]
 
@@ -36,8 +37,16 @@ _HASHY_RE = re.compile(r"^[0-9a-z]{4,}$", re.IGNORECASE)
 
 # any sign the file is a webpack-ish bundle worth scanning
 _WEBPACK_SIGNAL_RE = re.compile(
-    r"__webpack_require__|webpackJsonp|webpackChunk|\.chunk\.js|static/js/|installedChunks"
+    r"__webpack_require__|webpackJsonp|webpackChunk|\.chunk\.js|static/js/|installedChunks|"
+    r"jsonpScriptSrc|__vite__mapDeps"
 )
+
+# publicPath:  __webpack_require__.p = "https://cdn/app/"  |  n.p="/static/js/"
+_PUBLIC_PATH_RE = re.compile(r"""(?:__webpack_require__|[A-Za-z_$][\w$]*)\.p\s*=\s*["']([^"']*)["']""")
+
+# Vite:  d=(m.f||(m.f=["assets/a.js","assets/b.js"]))   (the dep-file manifest array)
+_VITE_DEPS_RE = re.compile(r"""__vite__mapDeps[\s\S]{0,80}?\[([^\]]{0,8000})\]""")
+_VITE_FILE_RE = re.compile(r"""["']([^"']+?\.(?:js|mjs|css))["']""")
 
 # `.u = e => ...`  |  `.u = (e) => ...`  |  `.u = function(e){ ...`
 _U_ASSIGN_RE = re.compile(
@@ -63,7 +72,14 @@ _CHUNK_TEMPLATE_RE = re.compile(r"""["'][^"']*(?:static/js/|\.chunk\.js)[^"']*["
 
 
 def map_chunks(items, cfg=None) -> list:
-    """Map code-split chunks to the present JS set. Never raises; ``[]`` if no map."""
+    """Map code-split chunks to the present JS set. Never raises; ``[]`` if no map.
+
+    Handles webpack 5 (``.u = e => …{id:hash}``), CRA/webpack-4 (``static/js/``/
+    ``.chunk.js`` template), bare webpack-4 jsonp (``jsonpScriptSrc`` / ``webpackJsonp``
+    with a plain ``.js`` suffix and a custom ``publicPath``), and Vite (``__vite__mapDeps``
+    file array). Each record carries a reconstructed ``url`` (publicPath + origin) so a
+    ``present:false`` chunk is an actionable "operator must capture this" item — this
+    NEVER fetches (critique point 4)."""
     out: list = []
     try:
         names, ids = _present_index(items)
@@ -71,9 +87,12 @@ def map_chunks(items, cfg=None) -> list:
         map_entries: dict = {}   # chunk id -> hash
         prefix = ""
         suffix = ""
+        public_path = ""
+        base_url = ""
         entry_ids: set = set()
         ref_ids: set = set()
         found_map = False
+        vite_files: list = []
 
         for item in items or []:
             try:
@@ -82,10 +101,20 @@ def map_chunks(items, cfg=None) -> list:
                 text = ""
             if not text or not _WEBPACK_SIGNAL_RE.search(text):
                 continue
+            origin = getattr(item, "url", "") or ""
+
+            # Vite: the dep manifest lists real filenames directly.
+            for f in _extract_vite_files(text):
+                if f not in vite_files:
+                    vite_files.append(f)
+                    if not base_url and origin:
+                        base_url = origin
 
             pfx, sfx, entries = _extract_u_map(text)
             if not entries:
                 pfx, sfx, entries = _extract_fallback_map(text)
+            if not entries:
+                pfx, sfx, entries = _extract_jsonp_map(text)
             if entries:
                 found_map = True
                 if pfx and not prefix:
@@ -94,6 +123,12 @@ def map_chunks(items, cfg=None) -> list:
                     suffix = sfx
                 for k, v in entries.items():
                     map_entries.setdefault(k, v)
+                if not base_url and origin:
+                    base_url = origin
+            if not public_path:
+                pm = _PUBLIC_PATH_RE.search(text)
+                if pm:
+                    public_path = pm.group(1)
 
             for em in _E_REF_RE.finditer(text):
                 rid = em.group(1) or em.group(2)
@@ -106,31 +141,100 @@ def map_chunks(items, cfg=None) -> list:
                     if eid:
                         entry_ids.add(eid)
 
-        if not found_map or not map_entries:
-            # No chunk map: referenced ids alone can't be told from noise -> [] (spec).
-            return []
-
         seen: set = set()
-        # mapped chunks -> async (entry if flagged by installedChunks)
-        for cid, chash in map_entries.items():
-            fname = _reconstruct(prefix, suffix, cid, chash)
-            present = _is_present(cid, fname, names, ids)
-            kind = "entry" if cid in entry_ids else "async"
-            _add(out, seen, cid, fname, present, kind)
-        # referenced-only chunks (dynamic import to an id not in the map) -> referenced
-        for rid in ref_ids:
-            if rid in map_entries:
-                continue
-            kind = "entry" if rid in entry_ids else "referenced"
-            _add(out, seen, rid, "", _is_present(rid, "", names, ids), kind)
-        # entry chunks neither mapped nor referenced
-        for eid in entry_ids:
-            if eid in map_entries or eid in ref_ids:
-                continue
-            _add(out, seen, eid, "", _is_present(eid, "", names, ids), "entry")
+        # Vite chunk files (filenames are authoritative; reconstruct the URL only)
+        for f in vite_files:
+            fid = os.path.basename(f)
+            present = _is_present(fid, f, names, ids)
+            _add(out, seen, fid, f, present, "vite", _reconstruct_url(public_path or "/", f, base_url))
+
+        if found_map and map_entries:
+            for cid, chash in map_entries.items():
+                fname = _reconstruct(prefix, suffix, cid, chash)
+                present = _is_present(cid, fname, names, ids)
+                kind = "entry" if cid in entry_ids else "async"
+                _add(out, seen, cid, fname, present, kind,
+                     _reconstruct_url(public_path, fname, base_url))
+            for rid in ref_ids:
+                if rid in map_entries:
+                    continue
+                kind = "entry" if rid in entry_ids else "referenced"
+                _add(out, seen, rid, "", _is_present(rid, "", names, ids), kind)
+            for eid in entry_ids:
+                if eid in map_entries or eid in ref_ids:
+                    continue
+                _add(out, seen, eid, "", _is_present(eid, "", names, ids), "entry")
         return out
     except Exception:
         return out if isinstance(out, list) else []
+
+
+def _extract_vite_files(text: str) -> list:
+    """Filenames from a Vite ``__vite__mapDeps`` dependency array."""
+    m = _VITE_DEPS_RE.search(text)
+    if not m:
+        return []
+    return [f for f in _VITE_FILE_RE.findall(m.group(1))]
+
+
+def _extract_jsonp_map(text: str):
+    """webpack-4 bare jsonp: a ``{id:"hash",...}`` map near ``jsonpScriptSrc`` /
+    ``webpackJsonp`` even when there is no ``static/js/``/``.chunk.js`` template.
+
+    Anchored on the jsonp signal to avoid matching unrelated objects; the filename
+    template (prefix/suffix) is read from the strings around the src function, else
+    defaults to a plain ``.js`` suffix."""
+    anchor = re.search(r"jsonpScriptSrc|webpackJsonp|installedChunks", text)
+    if not anchor:
+        return "", "", {}
+    lo = max(0, anchor.start() - 2500)
+    hi = min(len(text), anchor.end() + 2500)
+    window = text[lo:hi]
+    pos, scanned = 0, 0
+    while scanned < 400:
+        bi = window.find("{", pos)
+        if bi == -1:
+            break
+        obj, _oi, oj = _first_object(window, bi, limit=1)
+        if obj:
+            entries = _parse_map(obj)
+            if _looks_like_chunk_map(entries) and len(entries) >= 2:
+                prefix, suffix = _template_affixes(window)
+                if not suffix:
+                    suffix = ".js"          # bare webpack-4 default
+                return prefix, suffix, entries
+            pos = oj if oj > bi else bi + 1
+        else:
+            pos = bi + 1
+        scanned += 1
+    return "", "", {}
+
+
+def _reconstruct_url(public_path: str, filename: str, base_url: str) -> str:
+    """Best-effort absolute URL for a chunk: publicPath + filename, resolved against
+    the origin of the runtime chunk. Returns '' when nothing can be reconstructed."""
+    if not filename:
+        return ""
+    pp = public_path or ""
+    # the filename may already carry the publicPath (our template scan bakes it into the
+    # prefix); only apply publicPath to a genuinely RELATIVE filename to avoid doubling.
+    if filename.startswith(("http://", "https://")):
+        return filename
+    origin = ""
+    if base_url:
+        parts = urlsplit(base_url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+    if filename.startswith("//"):
+        return ("https:" + filename) if not origin else urlsplit(base_url).scheme + ":" + filename
+    if filename.startswith("/"):                 # already host-rooted: just add origin
+        return origin + filename if origin else filename
+    # relative filename -> prepend publicPath, then resolve against origin
+    if pp.startswith(("http://", "https://")):
+        return pp.rstrip("/") + "/" + filename.lstrip("/")
+    rel = (pp.rstrip("/") + "/" + filename.lstrip("/")) if pp else filename.lstrip("/")
+    if not origin:
+        return rel if rel.startswith("/") else ""
+    return origin + "/" + rel.lstrip("/")
 
 
 # --- present set --------------------------------------------------------------
@@ -296,12 +400,15 @@ def _first_object(text: str, start: int, limit: int = 0):
     return None, -1, -1
 
 
-def _add(out, seen, cid, fname, present, kind) -> None:
+def _add(out, seen, cid, fname, present, kind, url="") -> None:
     key = str(cid)
     if key in seen:
         return
     seen.add(key)
-    out.append({"id": key, "file": fname or "", "present": bool(present), "kind": kind})
+    rec = {"id": key, "file": fname or "", "present": bool(present), "kind": kind}
+    if url:
+        rec["url"] = url
+    out.append(rec)
 
 
 # --- text ---------------------------------------------------------------------

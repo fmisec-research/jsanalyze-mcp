@@ -106,6 +106,8 @@ class Triaged:
     chunks: list[dict] = field(default_factory=list)        # webpack chunk map (chunks.json)
     framework: dict = field(default_factory=dict)           # framework.json
     sourcemaps: list[dict] = field(default_factory=list)    # real .map refs + recovered
+    csp: list[dict] = field(default_factory=list)           # CSP directive hosts (csp.json)
+    notes: list[dict] = field(default_factory=list)         # mined source comments (source_notes.json)
     issues: list[str] = field(default_factory=list)         # enricher/jsluice failures (surfaced)
 
 
@@ -113,7 +115,14 @@ class Triaged:
 class Lead:
     """A vulnerability *candidate* (NOT a finding). Seeded deterministically from
     jsluice output, then tagged with a heuristic class + the hunt-* skill that
-    would PROVE it. severity_hint/confidence are potential only."""
+    would PROVE it. severity_hint/confidence are potential only.
+
+    v2 (critique point 10): every retained lead also carries the fields a model
+    needs to act WITHOUT re-reading a 30k-line bundle — a composite ``score`` (the
+    real queue order, with explainable ``score_factors``), the short ``caller_chain``
+    (taint/data-flow hops), the request ``body_keys``, a crisp ``negative_control``
+    and the single ``experiment`` to run. ``seen_in_history`` records whether the
+    endpoint was actually exercised in the captured traffic (False = untested surface)."""
 
     id: str
     cls: str                            # taxonomy, e.g. "idor-candidate", "xss-sink"
@@ -129,6 +138,15 @@ class Lead:
     severity_hint: str = "info"         # POTENTIAL impact, never proven
     next_step: str = ""
     notes: str = ""
+    # --- v2 fields (point 10) -------------------------------------------------
+    score: float = 0.0                  # composite priority (primary sort key, desc)
+    score_factors: list[str] = field(default_factory=list)  # explainable +/- terms
+    seen_in_history: bool | None = None  # True/False/None(unknown): exercised in traffic?
+    caller_chain: list[str] = field(default_factory=list)   # taint/data-flow hops
+    body_keys: list[str] = field(default_factory=list)      # request body field names
+    method: str = ""                    # HTTP method (endpoints)
+    negative_control: str = ""          # the control that MUST fail for the bug to hold
+    experiment: str = ""                # the ONE specific test to run
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

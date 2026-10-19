@@ -126,15 +126,18 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 
 | File | Contents |
 |---|---|
-| `leads.json` | **Distilled, gated candidate queue** — distinct leads, secrets masked, each with `suggested_skill`. |
+| `leads.json` | **Distilled, gated candidate queue** — distinct leads, secrets masked, ordered by a **composite `score`** (not raw severity). Each lead carries `suggested_skill`, `score`+`score_factors`, `caller_chain` (taint hops), `body_keys`, `seen_in_history`, `negative_control`, and the one `experiment` to run. |
 | `report.md` | Human-readable report (masked) — the base for a model's triage. |
 | `endpoints.json` / `.txt` | Normalized endpoints (`method,path,host,query,body_keys,call_type,party,in_scope,dynamic,fetchable`) / clean fetchable feed for ffuf/httpx. |
 | `sinks.json` | Clustered DOM sinks: `sink_class, party, real_taint, lead, count, occurrences` (audit; only `lead=true` become leads). |
 | `postmessage.json` | `postmessage-listener` / `-sender`(`"*"`) / `-origin-bypass` / `onmessage`. |
 | `secrets.json` | Full secret values (jsluice+gitleaks+trufflehog, deduped) — **sensitive, gitignored**. |
 | `libs.json` | Vulnerable libraries (retire.js): component, version, CVE, CWE, severity. |
-| `flags.json` `routes.json` `storage.json` `graphql.json` `chunks.json` `framework.json` | The judgment layer the tool computes: SDK/UI feature flags, SPA routes, localStorage/cookie writes, GraphQL operations, webpack chunk map (present/missing), detected framework. |
-| `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads). |
+| `flags.json` `routes.json` `storage.json` `graphql.json` `chunks.json` `framework.json` | The judgment layer the tool computes: SDK/UI feature flags, SPA routes, localStorage/cookie writes, GraphQL operations, webpack/Vite chunk map (present/missing, with **reconstructed URLs** for webpack4 `webpackJsonp` + Vite), detected framework (+ XSS/pollution gadgets). |
+| `csp.json` | CSP `connect-src`/`frame-src`/… hosts parsed from the HTML response headers in the same capture (zero network) — internal/framed hosts the app is allowed to reach. |
+| `history.json` | The requests the operator ACTUALLY sent (every Burp/HAR item's method+URL, normalized). Drives the **JS-vs-traffic delta**: an endpoint in the bundle but absent here = untested surface (`endpoint-unverified`/`endpoint-hidden`). |
+| `source_notes.json` | Comments / mock-data paths / internal hosts / credentials mined from recovered `sources/` (sourcemap archaeology jsluice ignores). |
+| `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads); each un-recovered external `.map` becomes a `sourcemap` lead (fetch = Operator Gate). |
 | `issues.json` | Enricher/jsluice failures (surfaced, not swallowed). |
 | `js/*.js` | Decoded + beautified bodies (line numbers in leads refer here). |
 
@@ -151,10 +154,21 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `xss-sink` | sink — **gated**: real attacker-taint only, clustered | `hunt-xss` |
 | `postmessage-listener` / `-sender` / `-origin-bypass` | postMessage families | `hunt-xss` (/ `hunt-auth-bypass` if token) |
 | `feature-gate` | `ui-gate` flag (isAdmin / plan===) | `hunt-api` |
-| `vulnerable-library` | retire.js (CWE-driven) | `hunt-xss`(79)/`hunt-injection`(89)/`hunt-server-side`(77/78/94/502)/`hunt-js-analysis` |
+| `vulnerable-library` | retire.js (CWE-driven; **low** until the vulnerable fn is proven called) | `hunt-xss`(79)/`hunt-injection`(89)/`hunt-server-side`(77/78/94/502)/`hunt-js-analysis` |
+| `websocket` | `ws(s)://` · `/websocket` · socket.io | `hunt-websocket` |
+| `endpoint-unverified` | in-scope API in the bundle but **never in captured traffic** | `hunt-api` |
+| `endpoint-hidden` | first-party SPA route with no fetch equivalent, not in traffic | `hunt-api` |
+| `token-storage` | token/jwt/session/`*_token` written to cookie/localStorage | `hunt-auth-bypass` |
+| `graphql-operation` | a parsed query/mutation (variables = body_keys) | `hunt-graphql` |
+| `csp-endpoint` | internal/framed host in CSP `connect/frame-src`, not in traffic | `hunt-api` |
+| `framework-gadget` | `bypassSecurityTrust*` · `v-html` · dynamic `javascript:` · `__NEXT_DATA__` · lodash/jQuery deep-merge | `hunt-xss` / `hunt-server-side` |
+| `sourcemap` | external `.map` referenced but not recovered (URL only) | `hunt-js-analysis` |
+| `sink-untraced` | sink whose identifier arg could not be tied to a source (audit, **demoted**, not a lead) | — |
 
-> **Leads = candidates, not findings.** `severity_hint`/`confidence` are potential only. Proof =
-> an observed cross-boundary effect via the relevant `hunt-*` skill.
+> **Leads = candidates, not findings.** `severity_hint`/`confidence` are potential only; the
+> queue is ordered by the composite **`score`** (explained in `score_factors`). Proof = an
+> observed cross-boundary effect via the relevant `hunt-*` skill — the multi-hop `caller_chain`,
+> `body_keys` and `experiment` tell you exactly what to try, so you rarely re-open the bundle.
 
 ## 8. Operator Gate & safety
 
@@ -170,14 +184,19 @@ Core pipeline (parsers/analyzers/leads/formatters) is stdlib-only and testable w
 runtime; the full server integration needs the venv (mcp + tools):
 
 ```bash
-PYTHONPATH=src python3 -P tests/test_pipeline.py     # noise-gate core
-./.venv/bin/python tests/test_enrichers.py           # full server.analyze integration
+PYTHONPATH=src python3 tests/test_units.py        # v2 pure modules (normalize/callsites/taint/scoring)
+PYTHONPATH=src python3 tests/test_pipeline.py     # noise-gate core
+PYTHONPATH=src python3 tests/test_regression.py   # locks the real-run failure shapes (point 12)
+./.venv/bin/python tests/test_enrichers.py        # full server.analyze integration
 ```
+
+`test_regression.py` builds an **anonymized synthetic** Burp XML (no target data) that exercises
+each shape that used to slip through — multi-hop `{__html:t}`, webpack-4 `webpackJsonp`, a SPA
+route misread as auth, a postMessage listener with no sink, a `*_token` cookie, a duplicated
+secret, a CSP internal host — and asserts the v2 behavior, so a regression fails loudly.
 
 # BONUS
 KO BISA??????????
 
 <img width="916" height="110" alt="image" src="https://github.com/user-attachments/assets/eb747d58-c835-4c33-9b31-372135bee1cc" />
 <img width="942" height="369" alt="image" src="https://github.com/user-attachments/assets/b13fc607-c923-4105-966a-4b8e0c30be68" />
-
-

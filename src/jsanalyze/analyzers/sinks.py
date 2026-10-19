@@ -19,13 +19,18 @@ leads; every surviving cluster is kept in sinks.json for audit.
 
 from __future__ import annotations
 
+import os
 import re
 
+from jsanalyze.analyzers.taint import (
+    backtrace, discover_html_sinks, sink_arg_idents, source_label, _root_idents,
+)
 from jsanalyze.party import party_of
 
 _SINK_CLASS = {
     "innerHTML": "html", "outerHTML": "html", "dangerouslySetInnerHTML": "html",
     "insertAdjacentHTML": "html", "documentWrite": "html", "document.write": "html",
+    "v-html": "html",
     "eval": "js", "Function": "js", "setTimeout": "js", "setInterval": "js",
     "src": "url", "href": "url", "location": "url", "location.href": "url",
     "assign": "url", "replace": "url", "open": "url",
@@ -101,11 +106,23 @@ def _prio(sink_class: str) -> tuple:
 
 def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     """Return clustered, classified sink records (for sinks.json). Each has `lead`
-    True only for a real-tainted, actionable, non-noise cluster."""
+    True only for a real-tainted, actionable, non-noise cluster.
+
+    Taint is judged in two passes (critique point 1): jsluice's own ``tainted`` flag,
+    then — when that is false but the sink's argument is an identifier — a bounded
+    backward trace through the file (``var t = location.hash; … innerHTML = t``). A
+    cluster whose argument cannot be tied to a source is kept as a demoted
+    ``sink-untraced`` audit row (low confidence, never a lead) rather than dropped.
+    React/Vue sinks jsluice misses (``dangerouslySetInnerHTML`` / ``v-html``) are
+    discovered and traced the same way.
+    """
     path_to_url = {it.saved_path: it.url for it in (items or []) if getattr(it, "saved_path", None)}
+    text_by_base = _text_index(items)
     clusters: dict = {}
 
-    for rec in sink_records or []:
+    records = list(sink_records or []) + _discovered_records(items)
+
+    for rec in records:
         if not isinstance(rec, dict):
             continue
         kind = rec.get("kind") or ""
@@ -123,7 +140,28 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         party = party_of(src_file, origin or "", scope_hosts)
         tainted = bool(rec.get("tainted"))
         taint = rec.get("taint")
+
+        # pass 1: jsluice's own direct-taint judgement
         real = _real_taint(sink_class, tainted, taint)
+        taint_source = taint if real else None
+        chain: list = []
+        untraced = False
+
+        # pass 2: bounded backward trace when jsluice saw no direct taint
+        if not real and sink_class in ("html", "js", "attr", "url"):
+            idents = rec.get("arg_expr") and _root_idents(rec["arg_expr"]) \
+                or sink_arg_idents(kind, source)
+            if idents:
+                text = text_by_base.get(src_file, "")
+                if text:
+                    lab, chain = backtrace(text, idents)
+                    if lab and (sink_class != "url" or any(
+                            tok in lab.lower() for tok in _INJECTABLE)):
+                        real, taint_source = True, lab
+                    else:
+                        untraced = True
+                else:
+                    untraced = True
 
         key = _signature(kind, sink_class, source, real)
         occ = {"file": src_file, "line": rec.get("line"), "source": " ".join(source.split())[:200]}
@@ -135,14 +173,20 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
             lead = real and sink_class in ("html", "js", "url", "attr") and party != "vendor"
             clusters[key] = {
                 "sink_class": sink_class, "kind": kind, "party": party,
-                "tainted": tainted, "taint_source": taint, "real_taint": real,
-                "lead": lead,
+                "tainted": tainted, "taint_source": taint_source, "real_taint": real,
+                "lead": lead, "untraced": untraced and not real,
+                "caller_chain": chain,
+                "detector": "jsluice:sinks" if not rec.get("discovered") else f"taint:{rec.get('framework', 'dom')}",
                 "severity_hint": sev if real else "info",
                 "confidence": conf if real else "low",
                 "count": 0, "occurrences": [],
             }
             cl = clusters[key]
         cl["count"] += 1
+        if chain and not cl.get("caller_chain"):
+            cl["caller_chain"] = chain
+        if taint_source and not cl.get("taint_source"):
+            cl["taint_source"] = taint_source
         if len(cl["occurrences"]) < 10:
             cl["occurrences"].append(occ)
         # a cluster's party is first/third if ANY occurrence is (vendor is the weakest)
@@ -157,4 +201,44 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         clusters.values(),
         key=lambda c: (not c["lead"], sev_rank.get(c["severity_hint"], 9), -c["count"]),
     )
+    return out
+
+
+def _text_index(items) -> dict:
+    out: dict = {}
+    for it in (items or []):
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        base = os.path.basename(sp)
+        if base in out:
+            continue
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                out[base] = fh.read()
+        except OSError:
+            continue
+    return out
+
+
+def _discovered_records(items) -> list:
+    """React/Vue HTML sinks jsluice does not emit, as sink-record dicts."""
+    out = []
+    for it in (items or []):
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        base = os.path.basename(sp)
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for d in discover_html_sinks(text):
+            out.append({
+                "kind": d["kind"], "source": d["source"], "line": d["line"],
+                "filename": sp, "source_file": base, "origin_url": getattr(it, "url", ""),
+                "arg_expr": d["arg_expr"], "framework": d["framework"],
+                "tainted": False, "discovered": True,
+            })
     return out
