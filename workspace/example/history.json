@@ -1,0 +1,33 @@
+{
+  "known": true,
+  "count": 4,
+  "hosts": [
+    "target.tld"
+  ],
+  "entries": [
+    {
+      "method": "GET",
+      "host": "target.tld",
+      "path": "/static/js/app.4f2a.js",
+      "norm": "/static/js/app.4f2a.js"
+    },
+    {
+      "method": "GET",
+      "host": "target.tld",
+      "path": "/static/js/widget.js",
+      "norm": "/static/js/widget.js"
+    },
+    {
+      "method": "GET",
+      "host": "target.tld",
+      "path": "/static/js/vendor.min.js",
+      "norm": "/static/js/vendor.min.js"
+    },
+    {
+      "method": "GET",
+      "host": "target.tld",
+      "path": "/",
+      "norm": "/"
+    }
+  ]
+}

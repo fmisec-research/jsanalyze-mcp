@@ -2,155 +2,187 @@
   {
     "method": "",
     "path": "/v1",
+    "norm_path": "/v1",
     "host": "api.target.tld",
     "query": [],
     "body_keys": [],
     "call_type": "stringLiteral",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "https://api.target.tld/v1"
+    "url": "https://api.target.tld/v1",
+    "seen_in_history": false
   },
   {
     "method": "GET",
     "path": "EXPR/users/EXPR/orders/123",
+    "norm_path": "/{id}/users/{id}/orders/{id}",
     "host": "",
     "query": [],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": true,
     "fetchable": false,
     "detector": "jsluice",
-    "url": "EXPR/users/EXPR/orders/123"
+    "url": "EXPR/users/EXPR/orders/123",
+    "seen_in_history": false
   },
   {
     "method": "POST",
     "path": "/api/admin/users/promote",
+    "norm_path": "/api/admin/users/promote",
     "host": "",
     "query": [],
     "body_keys": [
       "role"
     ],
     "call_type": "axios.post",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/admin/users/promote"
+    "url": "/api/admin/users/promote",
+    "seen_in_history": false
   },
   {
     "method": "POST",
     "path": "/api/v1/auth/login",
+    "norm_path": "/api/v1/auth/login",
     "host": "",
     "query": [],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/auth/login"
+    "url": "/api/v1/auth/login",
+    "seen_in_history": false
   },
   {
     "method": "POST",
     "path": "/api/v1/auth/reset-password",
+    "norm_path": "/api/v1/auth/reset-password",
     "host": "",
     "query": [],
-    "body_keys": [],
+    "body_keys": [
+      "email"
+    ],
     "call_type": "axios.post",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/auth/reset-password"
+    "url": "/api/v1/auth/reset-password",
+    "seen_in_history": false
   },
   {
     "method": "POST",
     "path": "/graphql",
+    "norm_path": "/graphql",
     "host": "",
     "query": [],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/graphql"
+    "url": "/graphql",
+    "seen_in_history": false
   },
   {
     "method": "GET",
     "path": "/api/v0/legacy/export",
+    "norm_path": "/api/v0/legacy/export",
     "host": "",
     "query": [
       "user_id"
     ],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v0/legacy/export?user_id=1"
+    "url": "/api/v0/legacy/export?user_id=1",
+    "seen_in_history": false
   },
   {
     "method": "GET",
     "path": "/socket",
+    "norm_path": "/socket",
     "host": "api.target.tld",
     "query": [],
     "body_keys": [],
     "call_type": "websocket",
+    "string_kind": "api",
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "wss://api.target.tld/socket"
+    "url": "wss://api.target.tld/socket",
+    "seen_in_history": false
   },
   {
     "method": "GET",
     "path": "/api/v1/profile/me",
+    "norm_path": "/api/v1/profile/me",
     "host": "",
     "query": [],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "widget.js__6738f2f709.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/profile/me"
+    "url": "/api/v1/profile/me",
+    "seen_in_history": false
   },
   {
     "method": "GET",
     "path": "/api/v2/users/me/settings",
+    "norm_path": "/api/v2/users/me/settings",
     "host": "",
     "query": [],
     "body_keys": [],
     "call_type": "fetch",
+    "string_kind": "api",
     "where_found": "vendor.min.js__9d94d8982f.js",
     "party": "vendor",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v2/users/me/settings"
+    "url": "/api/v2/users/me/settings",
+    "seen_in_history": false
   }
 ]

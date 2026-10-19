@@ -6,6 +6,7 @@
     "reaches_sinks": [
       "innerHTML"
     ],
+    "data_flow_signal": null,
     "wildcard_target": false,
     "file": "app.4f2a.js__6cb6251497.js",
     "line": 32,
