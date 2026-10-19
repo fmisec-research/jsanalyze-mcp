@@ -8,14 +8,14 @@
     "body_keys": [],
     "call_type": "stringLiteral",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 2,
+    "where_found": "app.4f2a.js__6cb6251497.js:2",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "https://api.target.tld/v1",
-    "seen_in_history": false
+    "url": "https://api.target.tld/v1"
   },
   {
     "method": "GET",
@@ -26,14 +26,14 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
+    "line": null,
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": true,
     "fetchable": false,
     "detector": "jsluice",
-    "url": "EXPR/users/EXPR/orders/123",
-    "seen_in_history": false
+    "url": "EXPR/users/EXPR/orders/123"
   },
   {
     "method": "POST",
@@ -46,14 +46,14 @@
     ],
     "call_type": "axios.post",
     "string_kind": "api",
+    "line": null,
     "where_found": "app.4f2a.js__6cb6251497.js",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/admin/users/promote",
-    "seen_in_history": false
+    "url": "/api/admin/users/promote"
   },
   {
     "method": "POST",
@@ -64,14 +64,14 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 9,
+    "where_found": "app.4f2a.js__6cb6251497.js:9",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/auth/login",
-    "seen_in_history": false
+    "url": "/api/v1/auth/login"
   },
   {
     "method": "POST",
@@ -84,14 +84,14 @@
     ],
     "call_type": "axios.post",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 16,
+    "where_found": "app.4f2a.js__6cb6251497.js:16",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/auth/reset-password",
-    "seen_in_history": false
+    "url": "/api/v1/auth/reset-password"
   },
   {
     "method": "POST",
@@ -102,14 +102,14 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 19,
+    "where_found": "app.4f2a.js__6cb6251497.js:19",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/graphql",
-    "seen_in_history": false
+    "url": "/graphql"
   },
   {
     "method": "GET",
@@ -122,14 +122,14 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 25,
+    "where_found": "app.4f2a.js__6cb6251497.js:25",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v0/legacy/export?user_id=1",
-    "seen_in_history": false
+    "url": "/api/v0/legacy/export?user_id=1"
   },
   {
     "method": "GET",
@@ -140,14 +140,14 @@
     "body_keys": [],
     "call_type": "websocket",
     "string_kind": "api",
-    "where_found": "app.4f2a.js__6cb6251497.js",
+    "line": 26,
+    "where_found": "app.4f2a.js__6cb6251497.js:26",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "wss://api.target.tld/socket",
-    "seen_in_history": false
+    "url": "wss://api.target.tld/socket"
   },
   {
     "method": "GET",
@@ -158,14 +158,14 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
-    "where_found": "widget.js__6738f2f709.js",
+    "line": 2,
+    "where_found": "widget.js__6738f2f709.js:2",
     "party": "first",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v1/profile/me",
-    "seen_in_history": false
+    "url": "/api/v1/profile/me"
   },
   {
     "method": "GET",
@@ -176,13 +176,13 @@
     "body_keys": [],
     "call_type": "fetch",
     "string_kind": "api",
-    "where_found": "vendor.min.js__9d94d8982f.js",
+    "line": 6,
+    "where_found": "vendor.min.js__9d94d8982f.js:6",
     "party": "vendor",
     "in_scope": true,
     "dynamic": false,
     "fetchable": true,
     "detector": "jsluice",
-    "url": "/api/v2/users/me/settings",
-    "seen_in_history": false
+    "url": "/api/v2/users/me/settings"
   }
 ]

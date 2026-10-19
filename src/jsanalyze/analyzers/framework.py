@@ -90,6 +90,30 @@ _NEXT_DATA_RE = re.compile(r"__NEXT_DATA__")
 _JSURI_RE = re.compile(
     r"""(?:href|src|xlink:href|formaction|action)\b[^;\n{}]{0,40}?javascript:""", re.I)
 _JSURI_DYNAMIC = re.compile(r"""javascript:['"`]?\s*(?:\+|\$\{)|(?:\+|\$\{)[^;\n]{0,20}javascript:""")
+# round 2 (new): OAuth literals and Firebase web-config object
+_OAUTH_IMPLICIT_RE = re.compile(r"response_type\s*[=:]\s*['\"]?\s*(token|id_token)\b", re.I)
+_OAUTH_REDIRECT_RE = re.compile(r"\bredirect_uri\b", re.I)
+_AIZA_RE = re.compile(r"AIza[0-9A-Za-z\-_]{20,}")
+
+
+def _firebase_configs(text: str) -> list:
+    """Firebase web-config objects: ``apiKey`` + ``authDomain`` + (``projectId`` |
+    ``databaseURL``) co-occurring in a small window — one cloud lead, not a lone AIza."""
+    out, seen = [], set()
+    for m in re.finditer(r"authDomain", text):
+        lo, hi = max(0, m.start() - 500), min(len(text), m.end() + 500)
+        win = text[lo:hi]
+        if "apiKey" not in win or not ("projectId" in win or "databaseURL" in win):
+            continue
+        akm = _AIZA_RE.search(win)
+        apikey = akm.group(0) if akm else ""
+        dk = apikey or (m.start() // 400)
+        if dk in seen:
+            continue
+        seen.add(dk)
+        out.append({"pos": m.start(), "apikey": apikey,
+                    "evidence": " ".join(win[:180].split())})
+    return out
 
 
 def _scan_gadgets(text: str, party: str, base: str) -> list:
@@ -148,6 +172,40 @@ def _scan_gadgets(text: str, party: str, base: str) -> list:
                 "value is attacker-controlled. (hunt-xss)",
                 "A static javascript:void(0) is inert; only a dynamic, attacker-influenced URI runs.",
                 "Control the concatenated part of the javascript: URI and confirm execution on click/navigation.")
+    # OAuth implicit/hybrid flow — token travels in the URL fragment
+    om = _OAUTH_IMPLICIT_RE.search(text)
+    if om:
+        add("oauth-implicit", "hunt-auth-bypass", "oauth-implicit-flow", "medium", om,
+            f"OAuth implicit flow (response_type={om.group(1)})",
+            "The implicit/hybrid flow returns the token in the URL fragment — check redirect_uri "
+            "validation and token leakage (Referer/history); a loose redirect_uri = token theft. (hunt-auth-bypass)",
+            "An exact-match allowlisted redirect_uri with no token in the fragment is safe.",
+            "Tamper redirect_uri (subdomain/path/extra param) and see if the token is delivered to a URL you control.")
+    rm = _OAUTH_REDIRECT_RE.search(text)
+    if rm:
+        add("oauth-redirect", "hunt-auth-bypass", "oauth-redirect-uri", "low", rm,
+            "OAuth redirect_uri construction",
+            "An OAuth redirect_uri is built here — test whether the authorization server accepts a "
+            "manipulated redirect_uri (subdomain, path, extra param, open-redirect chain) to steal "
+            "the code/token. (hunt-auth-bypass)",
+            "An exact-match allowlisted redirect_uri cannot be manipulated.",
+            "Replay the authorize request with a tampered redirect_uri; delivery of code/token to your URL = ATO.")
+    # Firebase web config -> ONE hunt-cloud lead (the AIza alone is suppressed in _secret_leads)
+    for fc in _firebase_configs(text):
+        line = text.count("\n", 0, fc["pos"]) + 1
+        out.append({
+            "cls": "cloud-config", "suggested_skill": "hunt-cloud", "gadget": "firebase-config",
+            "severity_hint": "medium", "confidence": "medium", "party": party, "file": base,
+            "line": line, "evidence": fc["evidence"], "apikey": fc["apikey"],
+            "title": "Firebase web config (apiKey + authDomain + projectId/databaseURL)",
+            "next_step": "A full Firebase web config. The apiKey is public BY DESIGN — the exposure is "
+                         "the project's Firestore/RTDB/Storage SECURITY RULES and whether self-signup "
+                         "is open, NOT the key. Enumerate those. (hunt-cloud)",
+            "negative_control": "Locked-down security rules + disabled open signup = not exploitable; "
+                                "the apiKey by itself is never the finding.",
+            "experiment": "With the projectId, probe Firestore/RTDB/Storage REST for unauthenticated "
+                          "read/write and whether self-signup is enabled (Operator Gate).",
+        })
     return out
 
 

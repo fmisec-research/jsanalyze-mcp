@@ -28,13 +28,18 @@ import re
 
 __all__ = ["backtrace", "sink_arg_idents", "discover_html_sinks", "source_label"]
 
-# attacker-controllable source tokens (lower-cased substring test on an expression)
+# attacker-controllable source tokens (lower-cased substring test on an expression).
+# NOTE (round 2, point 2): the loose ``.data`` / bare ``location`` matchers are gone —
+# they tagged ``formData`` / ``metadata`` / ``updateLocation`` as attacker input. A
+# ``.data`` source must be a MESSAGE-event data access (``e.data`` / ``event.data``),
+# never any identifier that happens to end in "data".
 _SOURCES = (
     "location.hash", "location.search", "location.href", "location.pathname",
-    "location.search", "document.url", "document.documenturi", "document.referrer",
-    "document.baseuri", "window.name", "event.data", ".data", "postmessage",
+    "document.url", "document.documenturi", "document.referrer",
+    "document.baseuri", "window.name", "postmessage",
     "localstorage", "sessionstorage", "urlsearchparams", "searchparams",
-    "getparameter", "referrer", "location", "e.data", "evt.data", "msg.data",
+    "getparameter", "referrer",
+    "event.data", "e.data", "evt.data", "ev.data", "msg.data", "message.data",
     "window.location", "hashchange", "popstate",
 )
 # a source token that, standing alone, is really just navigation (not injectable)
@@ -42,9 +47,13 @@ _NAV_ONLY = ("location.pathname", "location.origin")
 
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _SOURCE_RE = re.compile(
-    r"location\s*\.\s*(?:hash|search|href|pathname)|location\b|document\s*\.\s*(?:URL|documentURI|"
-    r"referrer|baseURI)|\b\w*\.?data\b|window\s*\.\s*name|URLSearchParams|searchParams|"
-    r"getParameter|localStorage|sessionStorage|\breferrer\b",
+    r"location\s*\.\s*(?:hash|search|href|pathname)"
+    r"|document\s*\.\s*(?:URL|documentURI|referrer|baseURI)"
+    # a message-event data access ONLY — bound the left side to a known event ident so
+    # ``formData`` / ``metadata`` / ``res.data`` are NOT treated as attacker sources.
+    r"|\b(?:e|ev|evt|event|msg|message)\s*\.\s*data\b"
+    r"|window\s*\.\s*name|URLSearchParams|searchParams|getParameter"
+    r"|localStorage|sessionStorage|\breferrer\b",
     re.IGNORECASE,
 )
 
@@ -123,12 +132,18 @@ def _root_idents(expr: str) -> list:
     return out
 
 
-def backtrace(text: str, idents, max_hops: int = 4) -> "tuple[str | None, list[str]]":
+def backtrace(text: str, idents, max_hops: int = 4,
+              before: "int | None" = None) -> "tuple[str | None, list[str]]":
     """Walk ``idents`` backward through assignments / simple params in ``text``.
 
     Returns ``(source_or_None, chain)`` where ``chain`` is the short list of hops
     (e.g. ``['t = location.hash.slice(1)']``). Bounded by ``max_hops`` and a visited
     set; resolves nearest definitions only and never leaves this file.
+
+    ``before`` is the character offset of the SINK. In a minified bundle one letter
+    (``t``) is reassigned dozens of times; the definition that taints the sink is the
+    nearest one *preceding* it, never the first in the file (round 2, point 2). An
+    assignment at/after the sink cannot taint it, so it is ignored.
     """
     if isinstance(idents, str):
         idents = [idents]
@@ -139,23 +154,25 @@ def backtrace(text: str, idents, max_hops: int = 4) -> "tuple[str | None, list[s
             return lab, [idv]
 
     visited: set = set()
-    work = list(dict.fromkeys(idents))
+    # each item carries the offset below which its definition must sit
+    work = [(i, before) for i in dict.fromkeys(idents)]
     chain: list[str] = []
     hops = 0
     while work and hops < max_hops:
         hops += 1
-        nxt: list[str] = []
-        for name in work:
+        nxt: list = []
+        for name, limit in work:
             if name in visited or name in _NOISE_IDENTS:
                 continue
             visited.add(name)
-            rhs = _definition_rhs(text, name)
+            rhs, at = _definition_rhs(text, name, limit)
             if rhs is None:
                 # maybe it is a function parameter bound at a call site
                 rhs = _param_binding(text, name)
                 if rhs is None:
                     continue
                 chain.append(f"{name} ⇐ {_short(rhs)}")
+                at = None
             else:
                 chain.append(f"{name} = {_short(rhs)}")
             lab = source_label(rhs)
@@ -163,22 +180,32 @@ def backtrace(text: str, idents, max_hops: int = 4) -> "tuple[str | None, list[s
                 return lab, chain
             for sub in _root_idents(rhs):
                 if sub not in visited:
-                    nxt.append(sub)
+                    nxt.append((sub, at))        # the next hop must precede THIS def
         work = list(dict.fromkeys(nxt))
     return None, chain
 
 
-def _definition_rhs(text: str, name: str) -> "str | None":
-    """RHS of the nearest ``[var|let|const] name = <rhs>`` definition/assignment."""
-    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=\s*([^;\n]{1,300})")
-    m = rx.search(text)
-    if not m:
-        return None
-    rhs = m.group(1).strip()
-    # don't follow a self-reference (name = name.foo) into a loop
-    if re.match(r"^" + re.escape(name) + r"\b", rhs):
-        return None
-    return rhs
+def _definition_rhs(text: str, name: str,
+                    before: "int | None" = None) -> "tuple[str | None, int | None]":
+    """RHS (and start offset) of the ``[var|let|const] name = <rhs>`` assignment nearest
+    *before* ``before``; the first in the file when ``before`` is None. Returns
+    ``(None, None)`` if the only definitions sit at/after the sink."""
+    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=\s*([^;\n,]{1,300})")
+    chosen = None
+    for m in rx.finditer(text):
+        rhs = m.group(1).strip()
+        if re.match(r"^" + re.escape(name) + r"\b", rhs):
+            continue                             # self-reference (name = name.foo) — skip
+        if before is None:
+            chosen = m
+            break                                # first definition (whole-file fallback)
+        if m.start() < before:
+            chosen = m                           # keep the LATEST one preceding the sink
+        else:
+            break                                # reached/passed the sink: later defs can't taint it
+    if chosen is None:
+        return None, None
+    return chosen.group(1).strip(), chosen.start()
 
 
 def _param_binding(text: str, name: str) -> "str | None":
@@ -211,17 +238,23 @@ def _short(s: str, n: int = 80) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
-# --- framework HTML sinks jsluice does not emit -------------------------------
+# --- framework / DOM HTML sinks jsluice does not emit -------------------------
 _DSIH_RE = re.compile(r"dangerouslySetInnerHTML\s*[=:]\s*(\{[^}]{0,200}\}|[^,;\n}]{1,120})")
 _HTML_PROP_RE = re.compile(r"__html\s*:\s*([^,}\n]{1,160})")
 _VHTML_RE = re.compile(r"""v-html\s*=\s*(['"])(.*?)\1|"v-html"\s*,\s*([^,)\n]{1,120})""")
+# round 2, new sinks: DOMParser.parseFromString(x,'text/html'), Range.createContextual
+# Fragment(x), and the iframe `srcdoc` property/attribute — all parse attacker HTML.
+_DOMPARSER_RE = re.compile(r"\.\s*parseFromString\s*\(\s*([^,){\n]{1,160})")
+_CCF_RE = re.compile(r"\.\s*createContextualFragment\s*\(\s*([^){\n]{1,160})")
+_SRCDOC_RE = re.compile(r"""\bsrcdoc\s*[=:]\s*(?!['"])([^,;)}\n]{1,160})|\bsrcdoc\s*=\s*(['"])(.*?)\2""")
 
 
 def discover_html_sinks(text: str) -> list:
-    """Synthetic sink records for React/Vue HTML sinks jsluice misses.
+    """Synthetic sink records for React/Vue/DOM HTML sinks jsluice misses.
 
-    Each: ``{"kind","source","line","arg_expr","framework"}`` — the caller traces
-    ``arg_expr`` and clusters/promotes exactly like a jsluice sink.
+    Each: ``{"kind","source","line","pos","arg_expr","framework"}`` — the caller traces
+    ``arg_expr`` and clusters/promotes exactly like a jsluice sink. ``pos`` is the char
+    offset so the tracer can scope to the nearest definition before it.
     """
     out = []
     if not text:
@@ -234,7 +267,7 @@ def discover_html_sinks(text: str) -> list:
         if key in seen:
             return
         seen.add(key)
-        out.append({"kind": kind, "source": _short(whole, 160), "line": line,
+        out.append({"kind": kind, "source": _short(whole, 160), "line": line, "pos": pos,
                     "arg_expr": arg.strip(), "framework": fw})
 
     for m in _DSIH_RE.finditer(text):
@@ -249,4 +282,12 @@ def discover_html_sinks(text: str) -> list:
         arg = m.group(2) or m.group(3) or ""
         if arg:
             add("v-html", m.group(0), arg, m.start(), "vue")
+    for m in _DOMPARSER_RE.finditer(text):
+        add("parseFromString", m.group(0), m.group(1), m.start(), "dom")
+    for m in _CCF_RE.finditer(text):
+        add("createContextualFragment", m.group(0), m.group(1), m.start(), "dom")
+    for m in _SRCDOC_RE.finditer(text):
+        arg = m.group(3) if m.group(3) is not None else m.group(1)
+        if arg:
+            add("srcdoc", m.group(0), arg, m.start(), "dom")
     return out

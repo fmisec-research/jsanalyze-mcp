@@ -129,13 +129,13 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `leads.json` | **Distilled, gated candidate queue** — distinct leads, secrets masked, ordered by a **composite `score`** (not raw severity). Each lead carries `suggested_skill`, `score`+`score_factors`, `caller_chain` (taint hops), `body_keys`, `seen_in_history`, `negative_control`, and the one `experiment` to run. |
 | `report.md` | Human-readable report (masked) — the base for a model's triage. |
 | `endpoints.json` / `.txt` | Normalized endpoints (`method,path,host,query,body_keys,call_type,party,in_scope,dynamic,fetchable`) / clean fetchable feed for ffuf/httpx. |
-| `sinks.json` | Clustered DOM sinks: `sink_class, party, real_taint, lead, count, occurrences` (audit; only `lead=true` become leads). |
+| `sinks.json` | Clustered DOM sinks: `sink_class, party, real_taint, lead, untraced, count, occurrences` (audit). `lead=true` → `xss-sink`; a first-party HTML/JS `untraced` cluster → a **low** `sink-untraced` lead (not silence). |
 | `postmessage.json` | `postmessage-listener` / `-sender`(`"*"`) / `-origin-bypass` / `onmessage`. |
 | `secrets.json` | Full secret values (jsluice+gitleaks+trufflehog, deduped) — **sensitive, gitignored**. |
 | `libs.json` | Vulnerable libraries (retire.js): component, version, CVE, CWE, severity. |
 | `flags.json` `routes.json` `storage.json` `graphql.json` `chunks.json` `framework.json` | The judgment layer the tool computes: SDK/UI feature flags, SPA routes, localStorage/cookie writes, GraphQL operations, webpack/Vite chunk map (present/missing, with **reconstructed URLs** for webpack4 `webpackJsonp` + Vite), detected framework (+ XSS/pollution gadgets). |
 | `csp.json` | CSP `connect-src`/`frame-src`/… hosts parsed from the HTML response headers in the same capture (zero network) — internal/framed hosts the app is allowed to reach. |
-| `history.json` | The requests the operator ACTUALLY sent (every Burp/HAR item's method+URL, normalized). Drives the **JS-vs-traffic delta**: an endpoint in the bundle but absent here = untested surface (`endpoint-unverified`/`endpoint-hidden`). |
+| `history.json` | The requests the operator ACTUALLY sent (every Burp/HAR item's method+URL, normalized). Drives the **JS-vs-traffic delta** (PATH-first: an endpoint with no method still matches a `GET`). "API exercised" needs a real backend call — assets, the site root and static HTML don't count — so a passive page-load capture never paints the whole bundle as untested surface. |
 | `source_notes.json` | Comments / mock-data paths / internal hosts / credentials mined from recovered `sources/` (sourcemap archaeology jsluice ignores). |
 | `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads); each un-recovered external `.map` becomes a `sourcemap` lead (fetch = Operator Gate). |
 | `issues.json` | Enricher/jsluice failures (surfaced, not swallowed). |
@@ -151,6 +151,7 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `graphql-candidate` | endpoint `/graphql` | `hunt-graphql` |
 | `api-version` | endpoint `/v0`·`/beta`·`/legacy` | `hunt-api` |
 | `secret-location` | secret (cloud key → `hunt-cloud`) | `hunt-secrets-disclosure` |
+| `cloud-config` | Firebase web config (`apiKey`+`authDomain`+`projectId`/`databaseURL`) — the lone `AIza` key is **folded** into this one lead | `hunt-cloud` |
 | `xss-sink` | sink — **gated**: real attacker-taint only, clustered | `hunt-xss` |
 | `postmessage-listener` / `-sender` / `-origin-bypass` | postMessage families | `hunt-xss` (/ `hunt-auth-bypass` if token) |
 | `feature-gate` | `ui-gate` flag (isAdmin / plan===) | `hunt-api` |
@@ -162,8 +163,10 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `graphql-operation` | a parsed query/mutation (variables = body_keys) | `hunt-graphql` |
 | `csp-endpoint` | internal/framed host in CSP `connect/frame-src`, not in traffic | `hunt-api` |
 | `framework-gadget` | `bypassSecurityTrust*` · `v-html` · dynamic `javascript:` · `__NEXT_DATA__` · lodash/jQuery deep-merge | `hunt-xss` / `hunt-server-side` |
+| `oauth-implicit` / `oauth-redirect` | `response_type=token` (implicit flow) · `redirect_uri` construction | `hunt-auth-bypass` |
+| `mock-data-path` | `mock`/`dummyData`/`fixture` path mined from recovered source (may serve real prod data) | `hunt-js-analysis` |
 | `sourcemap` | external `.map` referenced but not recovered (URL only) | `hunt-js-analysis` |
-| `sink-untraced` | sink whose identifier arg could not be tied to a source (audit, **demoted**, not a lead) | — |
+| `sink-untraced` | first-party HTML/JS sink whose identifier arg the **single-file** tracer could not tie to a source — **low** audit lead (helper may be in another chunk; confirm by hand) | `hunt-xss` |
 
 > **Leads = candidates, not findings.** `severity_hint`/`confidence` are potential only; the
 > queue is ordered by the composite **`score`** (explained in `score_factors`). Proof = an

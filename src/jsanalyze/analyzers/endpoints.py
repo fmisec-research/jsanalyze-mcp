@@ -10,6 +10,8 @@ Each kept row is one normalized endpoint; `EXPR` is kept with `dynamic:true`.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from urllib.parse import urlsplit
@@ -17,7 +19,7 @@ from urllib.parse import urlsplit
 from jsanalyze.analyzers.callsites import request_shape
 from jsanalyze.party import is_library_comment_url, party_of
 from jsanalyze.utils.normalize import (
-    ASSET_PREFIX, SPA_ROUTE, classify_string_kind, endpoint_key, normalize_path,
+    ASSET_PREFIX, SPA_ROUTE, classify_string_kind, normalize_path,
 )
 
 _MIME_RE = re.compile(r"^[a-z]+/[a-z0-9][a-z0-9.+\-]*\*?$", re.I)      # audio/mpeg, application/json
@@ -112,8 +114,12 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
     path_to_url = {it.saved_path: it.url for it in (items or []) if getattr(it, "saved_path", None)}
     text_by_base = _text_index(items)
     route_set = {normalize_path(p) for p in (route_paths or [])}
-    hist_keys = (history or {}).get("keys") if isinstance(history, dict) else None
-    hist_known = bool((history or {}).get("known")) if isinstance(history, dict) else False
+    # path-first membership (critique round 2, point 1): compare on (host, norm_path),
+    # not a method-sensitive tuple, and only claim seen/unseen when real API traffic
+    # exists to compare against (``api_known``).
+    hist_path_keys = (history or {}).get("path_keys") if isinstance(history, dict) else None
+    hist_methods = (history or {}).get("methods") if isinstance(history, dict) else None
+    api_known = bool((history or {}).get("api_known")) if isinstance(history, dict) else False
     by_key, order = {}, []
     for rec in url_records or []:
         if not isinstance(rec, dict):
@@ -146,6 +152,7 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
             text = text_by_base[src_file]
             loc_line = line or _locate_line(text, url, path)
             if loc_line:
+                line = line or loc_line                  # remember it for the lead (point 5)
                 shape2 = request_shape(text, loc_line)
                 method = method or shape2.get("method", "")
                 if not body_keys:
@@ -164,6 +171,7 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
             "body_keys": body_keys,
             "call_type": call_type,
             "string_kind": string_kind,
+            "line": line,
             "where_found": f"{src_file}:{line}" if line else src_file,
             "party": party_of(src_file, origin or "", scope_hosts),
             "in_scope": _in_scope(host, scope_hosts),
@@ -172,9 +180,14 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
             "detector": rec.get("detector") or "jsluice",
             "url": url,
         }
-        if hist_known:
-            ek = endpoint_key(method, host, path, call_type=call_type)
-            norm["seen_in_history"] = ek in hist_keys
+        # seen_in_history is asserted ONLY against real API traffic, and PATH-FIRST: an
+        # endpoint whose method we could not read still matches a GET to the same path.
+        if api_known and isinstance(hist_path_keys, set):
+            seen = (host, npath) in hist_path_keys or ("", npath) in hist_path_keys
+            norm["seen_in_history"] = seen
+            if seen and isinstance(hist_methods, dict) and method:
+                ms = hist_methods.get((host, npath)) or hist_methods.get(("", npath)) or set()
+                norm["method_in_history"] = method.upper() in ms
         # collapse method/type variants of the same endpoint into ONE row, preferring
         # the variant that carries an HTTP method / body (critique point 1/2 dedupe).
         key = (norm["host"], norm["norm_path"])
@@ -237,6 +250,69 @@ def _text_index(items) -> dict:
                 out[base] = fh.read()
         except OSError:
             continue
+    return out
+
+
+_ATOB_RE = re.compile(r"""atob\s*\(\s*(['"])([A-Za-z0-9+/=_\-]{8,})\1\s*\)""")
+
+
+def _b64decode(raw: str) -> str:
+    """Decode a base64 (std or url-safe) literal to text, or '' if it isn't printable."""
+    s = raw.replace("-", "+").replace("_", "/")
+    s += "=" * (-len(s) % 4)
+    try:
+        out = base64.b64decode(s, validate=False)
+    except (binascii.Error, ValueError):
+        return ""
+    try:
+        txt = out.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    # printable only — reject binary that happened to decode
+    return txt if txt and all(32 <= ord(c) < 127 for c in txt) else ""
+
+
+def _url_like(dec: str):
+    """Yield the decoded string if it looks like a URL or a rooted API path."""
+    d = dec.strip()
+    if not d or " " in d or len(d) < 3:
+        return
+    low = d.lower()
+    if low.startswith(("http://", "https://", "ws://", "wss://", "//")):
+        yield d
+    elif d.startswith("/") and not d.startswith("//") and not _is_asset(d):
+        yield d
+
+
+def decode_atob_endpoints(items) -> list:
+    """Decode ``atob("…")`` literals and surface any that decode to a URL/rooted path as
+    endpoint candidates (round 2: base64-hidden endpoints are otherwise invisible).
+
+    Returns url-records shaped like linkfinder rows (``type:"atob"``); the normalizer
+    treats a real call-type as a genuine site. Pure, never fetches, never raises."""
+    out, seen = [], set()
+    for it in items or []:
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        base = os.path.basename(sp)
+        for m in _ATOB_RE.finditer(text):
+            dec = _b64decode(m.group(2))
+            if not dec:
+                continue
+            for cand in _url_like(dec):
+                key = (base, cand)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"url": cand, "type": "atob", "detector": "atob",
+                            "source_file": base, "filename": sp,
+                            "line": text.count("\n", 0, m.start()) + 1})
     return out
 
 

@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from jsanalyze.analyzers.chunks import map_chunks
-from jsanalyze.analyzers.endpoints import normalize_endpoints
+from jsanalyze.analyzers.endpoints import decode_atob_endpoints, normalize_endpoints
+from jsanalyze.analyzers.framework import detect_framework
 from jsanalyze.analyzers.jsluice_wrapper import resolve_jsluice, run_jsluice
 from jsanalyze.analyzers.postmessage import classify_postmessage
 from jsanalyze.analyzers.routes import extract_routes
@@ -63,6 +64,11 @@ fetch("/api/v1/users/42/orders", {method:"GET"});
 var routes = [{ path: "/register", component: Register }, { path: "/admin/users", component: AdminUsers }];
 var apiKeyPublic = "pk_live_ABCDEFGHIJKLMNOP1234";
 var stripeSecret = "sk_live_51ABCDEFGHIJKLMNOPQRSTUV";
+
+// round 2: a base64-hidden endpoint, a new DOM sink, and a Firebase web config
+var secretUrl = atob("L2FwaS92MS9zZWNyZXQ");
+new DOMParser().parseFromString(location.search, "text/html");
+var fb = {apiKey:"AIzaSyFAKE0000000000000000000000000000", authDomain:"demo.firebaseapp.com", projectId:"demo-1", databaseURL:"https://demo.firebaseio.com"};
 """
 
 RUNTIME_JS = r"""
@@ -107,6 +113,10 @@ def _build_xml(path: Path) -> None:
               extra_headers=f"Content-Security-Policy: {CSP}\r\n"),
         # real API traffic the operator DID send (establishes history):
         _item("https://target.tld/api/v1/users/42/orders", "target.tld", "GET", "JSON", "", '{"ok":1}', "application/json"),
+        # a GET to /api/v1/profile and a POST to /graphql — used to prove PATH-FIRST
+        # matching (the JS rows for these carry NO / a different method).
+        _item("https://target.tld/api/v1/profile", "target.tld", "GET", "JSON", "", '{"ok":1}', "application/json"),
+        _item("https://target.tld/graphql", "target.tld", "POST", "JSON", "", '{"data":{}}', "application/json"),
     ]
     xml = '<?xml version="1.0"?>\n<items burpVersion="2024">\n' + "\n".join(items) + "\n</items>\n"
     path.write_text(xml, encoding="utf-8")
@@ -123,7 +133,14 @@ def _run(xml: Path, run):
     # classification (regression for the real-pipeline bug where a linkfinder-typed row
     # upgraded the /register route to an `api` auth-endpoint).
     extra_urls = [{"url": "/register", "type": "linkfinder", "method": "", "detector": "linkfinder",
-                   "filename": "main.js", "source_file": "main.js"}]
+                   "filename": "main.js", "source_file": "main.js"},
+                  # these carry NO method (jsluice urls rows don't) — PATH-FIRST must still
+                  # match them to the GET /api/v1/profile and POST /graphql in history.
+                  {"url": "/api/v1/profile", "type": "stringLiteral", "method": "",
+                   "detector": "jsluice", "filename": "main.js", "source_file": "main.js"},
+                  {"url": "/graphql", "type": "stringLiteral", "method": "",
+                   "detector": "jsluice", "filename": "main.js", "source_file": "main.js"}]
+    extra_urls += decode_atob_endpoints(js_items)        # base64-hidden endpoints
     tri = Triaged(
         endpoints=normalize_endpoints(list(a.urls) + extra_urls, js_items, cfg, SCOPE,
                                       route_paths=[r["path"] for r in routes], history=history),
@@ -133,6 +150,7 @@ def _run(xml: Path, run):
         routes=routes,
         storage=scan_storage(js_items, cfg),
         chunks=map_chunks(js_items, cfg=cfg),
+        framework=detect_framework(js_items, cfg=cfg),
         csp=csp.get("directives", []),
     )
     leads = build_leads(tri, cfg=cfg, history=history, scope_hosts=SCOPE)
@@ -243,11 +261,72 @@ def _assert_all(tri, leads, history, csp) -> list:
         f"endpoint exercised in traffic not flagged seen_in_history: {[(n['path'], n.get('seen_in_history')) for n in orders]}"
     done.append("history delta: /api/v1/users/{id}/orders seen_in_history=True")
 
+    # 9) PATH-FIRST history (round 2 pt 1): a bundle endpoint with NO method still matches a
+    #    GET request to the same path; a different method (POST /graphql) matches too.
+    profile = [n for n in tri.endpoints if n.get("norm_path") == "/api/v1/profile"]
+    assert profile, "profile endpoint missing"
+    assert not profile[0].get("method"), "profile should have empty method (the whole point)"
+    assert profile[0].get("seen_in_history") is True, \
+        f"empty-method endpoint not matched to GET history (method-mismatch bug): {profile[0]}"
+    gq = [n for n in tri.endpoints if n.get("norm_path") == "/graphql"]
+    assert gq and gq[0].get("seen_in_history") is True, \
+        f"/graphql not matched to POST /graphql history: {gq}"
+    done.append("path-first history: no-method /api/v1/profile & /graphql match GET/POST traffic")
+
+    # 10) atob("…") base64-hidden endpoint surfaced
+    secret_eps = [n for n in tri.endpoints if n.get("norm_path") == "/api/v1/secret"]
+    assert secret_eps and secret_eps[0].get("detector") == "atob", \
+        f"base64-hidden endpoint (atob) not surfaced: {secret_eps}"
+    done.append("atob(\"…\") decoded -> /api/v1/secret endpoint (detector=atob)")
+
+    # 11) new DOM sink traced: DOMParser.parseFromString(location.search) -> xss-sink
+    assert any("parseFromString" in (l.get("title") or "") for l in by_cls.get("xss-sink", [])), \
+        f"parseFromString(location.search) not traced to an xss-sink: {by_cls.get('xss-sink')}"
+    done.append("new sink parseFromString(location.search) -> xss-sink")
+
+    # 12) Firebase config -> ONE hunt-cloud lead; the lone AIza is folded, not a 2nd secret
+    cloud = by_cls.get("cloud-config", [])
+    assert cloud and cloud[0]["suggested_skill"] == "hunt-cloud", \
+        f"firebase config not a hunt-cloud cloud-config lead: {cloud}"
+    assert not any("AIzaSyFAKE" in (l.get("evidence") or "") for l in by_cls.get("secret-location", [])), \
+        "firebase AIza key NOT folded — still a lone secret-location lead"
+    done.append("Firebase config -> 1 hunt-cloud lead; lone AIza folded (not duplicated)")
+
+    # 13) a JS-only capture must NOT look like exercised API surface
+    _assert_js_only_history()
+    done.append("JS-only capture: known=True but api_known=False (no false 'untested API')")
+
     # scoring sanity: the top lead is not a postMessage listener
     top = sorted(leads, key=lambda l: -float(l.get("score") or 0))[0]
     assert not top["class"].startswith("postmessage"), f"a postMessage lead is top of queue: {top}"
     done.append(f"composite score: top lead is {top['class']} (score={top['score']}), not a listener")
     return done
+
+
+def _assert_js_only_history() -> None:
+    """round 2 pt 1: a Burp export of only .js responses records traffic (known=True) but
+    is NOT evidence the API was exercised (api_known=False) — so bundle endpoints must not
+    be minted as endpoint-unverified 'untested surface'."""
+    with tempfile.TemporaryDirectory() as td:
+        # a passive page load: the HTML root + its static JS — NO backend API call
+        xml = Path(td) / "jsonly.xml"
+        items = [
+            _item("https://target.tld/", "target.tld", "GET", "HTML", "html", "<html></html>", "text/html"),
+            _item("https://target.tld/static/js/app.js", "target.tld", "GET", "script", "js",
+                  'fetch("/api/v1/widget",{method:"GET"});', "application/javascript"),
+        ]
+        xml.write_text('<?xml version="1.0"?>\n<items>\n' + "\n".join(items) + '\n</items>\n',
+                       encoding="utf-8")
+        h = collect_history(xml, SCOPE)
+        assert h["known"] is True, "the GETs are still traffic"
+        assert h["api_known"] is False, f"a page-load (HTML+JS, no API) must not be api_known: {h}"
+        # add one real API call -> now api_known flips True
+        xml2 = Path(td) / "withapi.xml"
+        items.append(_item("https://target.tld/api/v1/thing", "target.tld", "GET", "JSON", "",
+                           '{"ok":1}', "application/json"))
+        xml2.write_text('<?xml version="1.0"?>\n<items>\n' + "\n".join(items) + '\n</items>\n',
+                        encoding="utf-8")
+        assert collect_history(xml2, SCOPE)["api_known"] is True, "a real API call must set api_known"
 
 
 if __name__ == "__main__":

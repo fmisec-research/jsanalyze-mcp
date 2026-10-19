@@ -93,6 +93,8 @@ def map_chunks(items, cfg=None) -> list:
         ref_ids: set = set()
         found_map = False
         vite_files: list = []
+        saw_signal = False
+        signal_origin = ""
 
         for item in items or []:
             try:
@@ -102,6 +104,9 @@ def map_chunks(items, cfg=None) -> list:
             if not text or not _WEBPACK_SIGNAL_RE.search(text):
                 continue
             origin = getattr(item, "url", "") or ""
+            saw_signal = True
+            if not signal_origin:
+                signal_origin = origin
 
             # Vite: the dep manifest lists real filenames directly.
             for f in _extract_vite_files(text):
@@ -164,6 +169,19 @@ def map_chunks(items, cfg=None) -> list:
                 if eid in map_entries or eid in ref_ids:
                     continue
                 _add(out, seen, eid, "", _is_present(eid, "", names, ids), "entry")
+
+        # a webpack/jsonp bundle was present but no chunk map could be reconstructed and no
+        # chunk files were resolved: the runtime/main chunk that carries {id:hash} (or the
+        # inline HTML bootstrap) is NOT in the capture. Say so — a silent [] made the operator
+        # believe the bundle had no code-splitting (round 2, point 3).
+        if saw_signal and not out:
+            out.append({
+                "id": "(runtime)", "file": "", "present": False, "kind": "runtime-missing",
+                "url": signal_origin or "",
+                "note": "webpack/jsonp bundle detected but the chunk-id→hash map is not in this "
+                        "capture (it lives in the runtime/main chunk or an inline HTML bootstrap) "
+                        "— capture that file to resolve the async chunk URLs; this tool never fetches.",
+            })
         return out
     except Exception:
         return out if isinstance(out, list) else []

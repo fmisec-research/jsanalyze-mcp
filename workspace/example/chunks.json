@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "id": "(runtime)",
+    "file": "",
+    "present": false,
+    "kind": "runtime-missing",
+    "url": "https://target.tld/static/js/app.4f2a.js",
+    "note": "webpack/jsonp bundle detected but the chunk-id→hash map is not in this capture (it lives in the runtime/main chunk or an inline HTML bootstrap) — capture that file to resolve the async chunk URLs; this tool never fetches."
+  }
+]

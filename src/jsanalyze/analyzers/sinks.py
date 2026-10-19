@@ -30,7 +30,8 @@ from jsanalyze.party import party_of
 _SINK_CLASS = {
     "innerHTML": "html", "outerHTML": "html", "dangerouslySetInnerHTML": "html",
     "insertAdjacentHTML": "html", "documentWrite": "html", "document.write": "html",
-    "v-html": "html",
+    "v-html": "html", "parseFromString": "html", "createContextualFragment": "html",
+    "srcdoc": "html",
     "eval": "js", "Function": "js", "setTimeout": "js", "setInterval": "js",
     "src": "url", "href": "url", "location": "url", "location.href": "url",
     "assign": "url", "replace": "url", "open": "url",
@@ -149,19 +150,30 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
 
         # pass 2: bounded backward trace when jsluice saw no direct taint
         if not real and sink_class in ("html", "js", "attr", "url"):
-            idents = rec.get("arg_expr") and _root_idents(rec["arg_expr"]) \
-                or sink_arg_idents(kind, source)
-            if idents:
-                text = text_by_base.get(src_file, "")
-                if text:
-                    lab, chain = backtrace(text, idents)
-                    if lab and (sink_class != "url" or any(
-                            tok in lab.lower() for tok in _INJECTABLE)):
-                        real, taint_source = True, lab
+            arg_expr = rec.get("arg_expr") or ""
+            # the argument expression may itself BE a source (``parseFromString(location.search)``)
+            # — check it directly before reducing to root idents (which would drop the property).
+            direct = source_label(arg_expr) if arg_expr else None
+            if direct and (sink_class != "url" or any(tok in direct.lower() for tok in _INJECTABLE)):
+                real, taint_source = True, direct
+                chain = [arg_expr.strip()]
+            else:
+                idents = (_root_idents(arg_expr) if arg_expr else []) \
+                    or sink_arg_idents(kind, source)
+                if idents:
+                    text = text_by_base.get(src_file, "")
+                    if text:
+                        # scope the trace to the nearest definition BEFORE this sink — in a
+                        # minified bundle the same identifier is assigned many times (point 2).
+                        before = _sink_offset(text, source, rec.get("pos"), rec.get("line"))
+                        lab, chain = backtrace(text, idents, before=before)
+                        if lab and (sink_class != "url" or any(
+                                tok in lab.lower() for tok in _INJECTABLE)):
+                            real, taint_source = True, lab
+                        else:
+                            untraced = True
                     else:
                         untraced = True
-                else:
-                    untraced = True
 
         key = _signature(kind, sink_class, source, real)
         occ = {"file": src_file, "line": rec.get("line"), "source": " ".join(source.split())[:200]}
@@ -204,6 +216,29 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     return out
 
 
+def _sink_offset(text: str, source: str, pos, line) -> "int | None":
+    """Char offset of the sink in ``text`` so the tracer can scope to defs before it.
+
+    Prefers an explicit ``pos`` (discovered sinks carry it), then the raw ``source``
+    literal, then the start of ``line``. None means 'search the whole file' (old
+    behaviour) — acceptable for a short, non-minified file."""
+    if isinstance(pos, int) and pos >= 0:
+        return pos
+    if source:
+        idx = text.find(source.strip()[:80])
+        if idx != -1:
+            return idx
+    if isinstance(line, int) and line > 1:
+        off = 0
+        for _ in range(line - 1):
+            nl = text.find("\n", off)
+            if nl == -1:
+                return None
+            off = nl + 1
+        return off
+    return None
+
+
 def _text_index(items) -> dict:
     out: dict = {}
     for it in (items or []):
@@ -222,7 +257,7 @@ def _text_index(items) -> dict:
 
 
 def _discovered_records(items) -> list:
-    """React/Vue HTML sinks jsluice does not emit, as sink-record dicts."""
+    """React/Vue/DOM HTML sinks jsluice does not emit, as sink-record dicts."""
     out = []
     for it in (items or []):
         sp = getattr(it, "saved_path", None)
@@ -237,6 +272,7 @@ def _discovered_records(items) -> list:
         for d in discover_html_sinks(text):
             out.append({
                 "kind": d["kind"], "source": d["source"], "line": d["line"],
+                "pos": d.get("pos"),
                 "filename": sp, "source_file": base, "origin_url": getattr(it, "url", ""),
                 "arg_expr": d["arg_expr"], "framework": d["framework"],
                 "tainted": False, "discovered": True,

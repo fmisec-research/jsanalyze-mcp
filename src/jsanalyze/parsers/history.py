@@ -15,8 +15,20 @@ traffic, so ``known=False`` and the delta is simply not claimed.
 
 Contract: ``collect_history(path, scope_hosts=None) -> dict`` with::
 
-    {"known": bool, "count": int, "keys": set[(method, host, norm_path)],
-     "entries": [{"method","host","path","norm"}], "hosts": [..]}
+    {"known": bool, "api_known": bool, "count": int,
+     "keys": set[(method, host, norm_path)],          # method-sensitive (legacy)
+     "path_keys": set[(host, norm_path)],             # method-AGNOSTIC (primary)
+     "api_path_keys": set[(host, norm_path)],         # non-asset requests only
+     "methods": {(host, norm_path): set(method)},     # method booster
+     "entries": [{"method","host","path","norm","asset"}], "hosts": [..]}
+
+Matching is PATH-FIRST (critique round 2, point 1): an endpoint extracted from JS
+usually has no method (jsluice ``urls`` rows carry none), so a method-sensitive key
+can never meet a ``GET`` request and every path would look untested. We therefore
+compare on ``(host, norm_path)`` and treat the method only as a confirmation. And a
+Burp export that holds nothing but ``.js`` responses is NOT evidence the API was
+exercised — ``api_known`` is true only when at least one NON-asset request exists; we
+do not claim ``seen_in_history`` (or emit ``endpoint-unverified``) without it.
 """
 
 from __future__ import annotations
@@ -26,7 +38,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from jsanalyze.utils.normalize import history_key, normalize_path
+from jsanalyze.utils.normalize import history_key, looks_like_asset_path, normalize_path
 
 __all__ = ["collect_history"]
 
@@ -44,17 +56,21 @@ def _entry(method: str, url: str):
     parts = urlsplit(url or "")
     host = parts.netloc.split("@")[-1].split(":")[0].lower()
     path = parts.path or "/"
+    is_ws = parts.scheme in ("ws", "wss")
     return {
         "method": (method or "").upper(),
         "host": host,
         "path": path,
-        "norm": normalize_path(path) if parts.scheme not in ("ws", "wss") else path,
+        "norm": path if is_ws else normalize_path(path),
+        "asset": (not is_ws) and looks_like_asset_path(path),
     }
 
 
 def collect_history(path, scope_hosts=None) -> dict:
     p = Path(path)
-    out = {"known": False, "count": 0, "keys": set(), "entries": [], "hosts": []}
+    out = {"known": False, "api_known": False, "count": 0, "keys": set(),
+           "path_keys": set(), "api_path_keys": set(), "methods": {},
+           "entries": [], "hosts": []}
     try:
         suf = p.suffix.lower()
         if p.is_dir():
@@ -71,6 +87,9 @@ def collect_history(path, scope_hosts=None) -> dict:
     out["hosts"] = sorted({e["host"] for e in out["entries"] if e["host"]})
     out["count"] = len(out["entries"])
     out["known"] = out["count"] > 0
+    # "the API was exercised" requires at least one non-asset request — a capture of
+    # only .js/.css responses does NOT make bundle endpoints 'untested surface'.
+    out["api_known"] = bool(out["api_path_keys"])
     return out
 
 
@@ -81,11 +100,24 @@ def _record(out, method, url, scope_hosts):
     if not _in_scope(e["host"], scope_hosts):
         return
     out["entries"].append(e)
+    m, host, norm = e["method"], e["host"], e["norm"]
     key = history_key(method, url)
     out["keys"].add(key)
     # a rooted endpoint extracted from JS carries no host (``/api/x``); add a hostless
     # variant so it still matches this host-qualified request within the same scope.
     out["keys"].add((key[0], "", key[2]))
+    # "exercised the API" means a real backend call — NOT an asset, NOT the site root,
+    # NOT a static HTML document. A capture of just {GET /, GET /static/*.js} is a passive
+    # page load; it must not make every bundle endpoint look like untested surface.
+    is_api = (not e["asset"] and norm != "/"
+              and not norm.lower().endswith((".html", ".htm")))
+    # PATH-FIRST membership: method-agnostic (host, norm) + hostless, and the set of
+    # methods actually seen on that path (a booster, not a gate).
+    for h in (host, ""):
+        out["path_keys"].add((h, norm))
+        out["methods"].setdefault((h, norm), set()).add(m)
+        if is_api:
+            out["api_path_keys"].add((h, norm))
 
 
 def _from_xml(xml_path, scope_hosts, out) -> None:

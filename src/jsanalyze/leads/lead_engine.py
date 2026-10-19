@@ -85,7 +85,10 @@ def _first_occ(cluster):
 def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]:
     cfg = cfg or load_config()
     mask = cfg.get("mask_secrets_in_leads", True)
-    history_known = bool((history or {}).get("known")) if isinstance(history, dict) else False
+    # "the API was exercised" (a non-asset request exists) — NOT merely "some .js was
+    # fetched". endpoint-unverified and the +not_in_history boost ride on this, so a
+    # JS-only capture no longer paints every bundle path as untested surface (round 2 pt 1).
+    api_known = bool((history or {}).get("api_known")) if isinstance(history, dict) else False
 
     secret_files = {s.get("source_file") for s in (getattr(triaged, "secrets", []) or [])
                     if s.get("source_file")}
@@ -97,8 +100,8 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     pairs: list[tuple[Lead, ScoreInputs]] = []
     pairs += _sink_leads(triaged, secret_files)
     pairs += _pm_leads(triaged, secret_files)
-    pairs += _endpoint_leads(triaged, secret_files, history_known)
-    pairs += _hidden_route_leads(triaged, api_paths, history_known)
+    pairs += _endpoint_leads(triaged, secret_files, api_known)
+    pairs += _hidden_route_leads(triaged, api_paths, api_known)
     pairs += _storage_leads(triaged, secret_files)
     pairs += _graphql_leads(triaged)
     pairs += _sourcemap_leads(triaged)
@@ -111,7 +114,7 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
 
     leads: list[Lead] = []
     for ld, si in pairs:
-        si.history_known = history_known
+        si.history_known = api_known
         ld.score, ld.score_factors = score_lead(ld, si)
         leads.append(ld)
 
@@ -127,28 +130,53 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
 def _sink_leads(triaged, secret_files):
     out = []
     for c in getattr(triaged, "sinks", []) or []:
-        if not c.get("lead"):
-            continue
         f, line, src = _first_occ(c)
         extra = f" (+{c['count'] - 1} more)" if c.get("count", 1) > 1 else ""
         chain = c.get("caller_chain") or []
-        taint_src = c.get("taint_source") or (chain[0] if chain else "attacker input")
-        ld = Lead(
-            id="", cls="xss-sink", suggested_skill="hunt-xss",
-            title=f"DOM-XSS {c.get('kind')} [{c.get('sink_class')}] tainted by {taint_src}",
-            source_file=f, line=line, evidence=src, detector=c.get("detector", "jsluice:sinks"),
-            tainted=True, confidence=c.get("confidence", "medium"),
-            severity_hint=c.get("severity_hint", "high"),
-            caller_chain=chain,
-            next_step=NEXT_STEP["xss-sink"],
-            negative_control="A benign value in the same source must NOT execute; only the "
-                             "attacker-controlled payload does.",
-            experiment=f"In a browser, set the tainted source ({taint_src}) to a JS payload "
-                       f"and confirm execution (dialog/DOM marker) at {f}:{line}.",
-            notes=f"party={c.get('party')}; occurrences={c.get('count')}{extra}.",
-        )
-        out.append((ld, ScoreInputs(party=c.get("party", "first"), in_scope=True,
-                                    secret_nearby=f in secret_files)))
+        party = c.get("party", "first")
+        if c.get("lead"):
+            taint_src = c.get("taint_source") or (chain[0] if chain else "attacker input")
+            ld = Lead(
+                id="", cls="xss-sink", suggested_skill="hunt-xss",
+                title=f"DOM-XSS {c.get('kind')} [{c.get('sink_class')}] tainted by {taint_src}",
+                source_file=f, line=line, evidence=src, detector=c.get("detector", "jsluice:sinks"),
+                tainted=True, confidence=c.get("confidence", "medium"),
+                severity_hint=c.get("severity_hint", "high"),
+                caller_chain=chain,
+                next_step=NEXT_STEP["xss-sink"],
+                negative_control="A benign value in the same source must NOT execute; only the "
+                                 "attacker-controlled payload does.",
+                experiment=f"In a browser, set the tainted source ({taint_src}) to a JS payload "
+                           f"and confirm execution (dialog/DOM marker) at {f}:{line}.",
+                notes=f"party={c.get('party')}; occurrences={c.get('count')}{extra}.",
+            )
+            out.append((ld, ScoreInputs(party=party, in_scope=True,
+                                        secret_nearby=f in secret_files)))
+            continue
+        # an untraced FIRST/THIRD-party html/js sink whose argument is an identifier is a
+        # low-confidence audit lead, NOT silence (round 2, point 2): the tracer is bounded
+        # to one file, so a helper in another chunk is invisible — say so, don't fake taint.
+        if c.get("untraced") and party != "vendor" and c.get("sink_class") in ("html", "js"):
+            ld = Lead(
+                id="", cls="sink-untraced", suggested_skill="hunt-xss",
+                title=f"Untraced {c.get('kind')} [{c.get('sink_class')}] — argument not tied to a source",
+                source_file=f, line=line, evidence=src,
+                detector=c.get("detector", "jsluice:sinks"),
+                tainted=False, confidence="low", severity_hint="low",
+                caller_chain=chain,
+                next_step="A first-party HTML/JS sink whose input the bounded tracer could not "
+                          "tie to a source — confirm by hand whether attacker input reaches it "
+                          "(it may arrive from another chunk the tracer can't cross). (hunt-xss)",
+                negative_control="Not XSS unless an attacker-controlled value actually reaches this "
+                                 "argument; a purely internal value is not a finding.",
+                experiment=f"At {f}:{line}, read what feeds `{c.get('kind')}`; if it is reachable "
+                           f"from location/postMessage/storage (possibly via another file), build "
+                           f"the browser PoC — else drop it.",
+                notes=f"party={party}; occurrences={c.get('count')}{extra}; "
+                      f"tracer is single-file (no cross-chunk).",
+            )
+            out.append((ld, ScoreInputs(party=party, in_scope=True,
+                                        secret_nearby=f in secret_files)))
     return out
 
 
@@ -195,7 +223,7 @@ def _pm_leads(triaged, secret_files):
 
 
 # --- endpoints (classified) + the history delta -------------------------------
-def _endpoint_leads(triaged, secret_files, history_known):
+def _endpoint_leads(triaged, secret_files, api_known):
     out = []
     seen_ep = set()
     for n in getattr(triaged, "endpoints", []) or []:
@@ -213,11 +241,12 @@ def _endpoint_leads(triaged, secret_files, history_known):
             out.append((ld, ScoreInputs(
                 party=n.get("party", "first"), in_scope=n.get("in_scope"),
                 call_type=n.get("call_type", ""), has_id_segment=has_id,
-                secret_nearby=src_file in secret_files, history_known=history_known)))
+                secret_nearby=src_file in secret_files, history_known=api_known)))
             continue
         # not a classified class, but a first-party in-scope API endpoint that was
-        # NEVER exercised in the captured traffic is untested surface (critique point 2)
-        if (history_known and in_hist is False and n.get("string_kind") == "api"
+        # NEVER exercised in the captured traffic is untested surface (critique point 2).
+        # Requires REAL api traffic (api_known) — a JS-only capture claims nothing.
+        if (api_known and in_hist is False and n.get("string_kind") == "api"
                 and n.get("party") == "first" and n.get("in_scope") is not False
                 and n.get("fetchable")):
             key = ("endpoint-unverified", n.get("method"), n.get("norm_path"))
@@ -230,7 +259,7 @@ def _endpoint_leads(triaged, secret_files, history_known):
             out.append((ld, ScoreInputs(
                 party="first", in_scope=n.get("in_scope"), call_type=n.get("call_type", ""),
                 has_id_segment=has_id, secret_nearby=src_file in secret_files,
-                history_known=history_known)))
+                history_known=api_known)))
     return out
 
 
@@ -250,7 +279,7 @@ def _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist):
     exp = _endpoint_experiment(cls, n, body)
     return Lead(
         id="", cls=cls, suggested_skill=skill, title=f"{cls} — {ev}",
-        source_file=src_file, line=None, evidence=ev,
+        source_file=src_file, line=n.get("line"), evidence=ev,
         detector=f"{n.get('detector', 'jsluice')}:urls", confidence=conf, severity_hint=sev,
         method=n.get("method", ""), body_keys=body, seen_in_history=in_hist,
         next_step=NEXT_STEP.get(cls, "Map this endpoint's authz against two accounts/roles. (hunt-api)"),
@@ -287,7 +316,7 @@ _PRIV_ROUTE_HINTS = ("admin", "internal", "manage", "settings", "billing", "acco
                      "dashboard", "debug", "superuser", "staff", "console", "config")
 
 
-def _hidden_route_leads(triaged, api_paths, history_known):
+def _hidden_route_leads(triaged, api_paths, api_known):
     out = []
     seen = set()
     for r in getattr(triaged, "routes", []) or []:
@@ -300,9 +329,9 @@ def _hidden_route_leads(triaged, api_paths, history_known):
         if npath in api_paths:
             continue                              # has a fetch equivalent -> covered elsewhere
         priv = any(h in npath.lower() for h in _PRIV_ROUTE_HINTS)
-        # surface a route only when it is privileged-looking, or (if we have traffic)
+        # surface a route only when it is privileged-looking, or (if we have API traffic)
         # it was never navigated — otherwise plain pages would flood the queue.
-        if not priv and not history_known:
+        if not priv and not api_known:
             continue
         key = npath
         if key in seen:
@@ -315,7 +344,7 @@ def _hidden_route_leads(triaged, api_paths, history_known):
             title=f"Hidden route — {path}" + (f" [{r.get('component')}]" if r.get("component") else ""),
             source_file=r.get("file", ""), line=r.get("line"), evidence=path,
             detector=f"routes:{r.get('kind', 'spa')}", confidence=conf, severity_hint=sev,
-            seen_in_history=False if history_known else None,
+            seen_in_history=False if api_known else None,
             next_step="A first-party route with no fetch equivalent often fronts a privileged "
                       "view/API not in your traffic — drive it and test the backing calls as a "
                       "low-privilege role. (hunt-api)",
@@ -325,7 +354,7 @@ def _hidden_route_leads(triaged, api_paths, history_known):
             notes=f"party=first; kind={r.get('kind')}; privileged={priv}.",
         )
         out.append((ld, ScoreInputs(party="first", in_scope=True, has_id_segment="{id}" in npath,
-                                    history_known=history_known)))
+                                    history_known=api_known)))
     return out
 
 
@@ -510,8 +539,8 @@ def _note_leads(triaged):
     seen = set()
     for n in getattr(triaged, "notes", []) or []:
         cat = n.get("category")
-        if cat not in ("credential", "internal-host"):
-            continue                              # notes/mock-paths stay in the artifact
+        if cat not in ("credential", "internal-host", "mock-path"):
+            continue                              # plain dev notes stay in the artifact
         key = (cat, n.get("file"), n.get("text", "")[:60])
         if key in seen:
             continue
@@ -521,18 +550,30 @@ def _note_leads(triaged):
             nxt = ("A credential left in an original-source comment (recovered via sourcemap) — "
                    "verify it is live and map its blast radius. (hunt-secrets-disclosure)")
             exp = "Confirm the commented credential still works against its service (Operator Gate to verify)."
+            neg = "Only meaningful if the host/credential is reachable & in-scope."
+        elif cat == "mock-path":
+            # a "mock"/"dummyData"/"fixture" path recovered from source that is actually
+            # served in prod returns REAL data — the paying sourcemap-archaeology case.
+            cls, skill, sev = "mock-data-path", "hunt-js-analysis", "low"
+            nxt = ("A mock/fixture data path named in the recovered source — request it against "
+                   "the live origin; if it returns real (not stub) data it is an unguarded data "
+                   "exposure. Fetching = Operator Gate. (hunt-js-analysis)")
+            exp = (f"Request `{n.get('text')}` on the live host (Operator Gate); real/other-tenant "
+                   f"rows (vs static fixture) prove an exposure — then pivot to IDOR on its ids.")
+            neg = "Must return only static fixture content; live user/tenant rows = the bug."
         else:
             cls, skill, sev = "endpoint-hidden", "hunt-api", "low"
             nxt = ("A staging/internal host named only in the original source — resolve it, check "
                    "scope, and test whether it drops the main app's controls. (hunt-api)")
             exp = f"Resolve the host `{n.get('text')}` (in-scope?) and probe whether it enforces authz."
+            neg = "Only meaningful if the host/credential is reachable & in-scope."
         ld = Lead(
             id="", cls=cls, suggested_skill=skill,
             title=f"Source {cat} — {n.get('text', '')[:60]}",
             source_file=n.get("file", ""), line=n.get("line"), evidence=n.get("text", ""),
             detector="sourcemap:comments", confidence="low", severity_hint=sev,
             next_step=nxt,
-            negative_control="Only meaningful if the host/credential is reachable & in-scope.",
+            negative_control=neg,
             experiment=exp,
             notes=f"mined from recovered source ({cat}); party={n.get('party')}.",
         )
@@ -566,9 +607,20 @@ def _gadget_leads(triaged, secret_files):
 # --- secrets ------------------------------------------------------------------
 def _secret_leads(triaged, mask, secret_files):
     out = []
+    # a Google AIza key that is part of a detected Firebase config is already surfaced as
+    # ONE hunt-cloud lead (cloud-config); don't also emit it as a lone secret (round 2).
+    fw = getattr(triaged, "framework", {}) or {}
+    fb_keys = {g.get("apikey") for g in fw.get("gadgets", []) or []
+               if g.get("gadget") == "firebase-config" and g.get("apikey")}
+    fb_files = {g.get("file") for g in fw.get("gadgets", []) or []
+                if g.get("gadget") == "firebase-config"}
     for s in getattr(triaged, "secrets", []) or []:
         kind = s.get("kind") or "secret"
         data = s.get("data")
+        if (s.get("secret_label") == "google-api-key" or "AIza" in str(data)):
+            val = str(data)
+            if any(k and k in val for k in fb_keys) or s.get("source_file") in fb_files:
+                continue                                 # folded into the firebase cloud-config lead
         visibility = s.get("visibility")                 # set by the secrets normalizer
         if visibility == "public":
             skill, sev, conf = "hunt-js-analysis", "info", "low"
