@@ -30,6 +30,7 @@ from jsanalyze import setup as _setup
 from jsanalyze.analyzers.chunks import map_chunks
 from jsanalyze.analyzers.comment_miner import mine_comments
 from jsanalyze.analyzers.endpoints import decode_atob_endpoints, normalize_endpoints
+from jsanalyze.analyzers.strings import resolve_string_endpoints
 from jsanalyze.analyzers.flags import scan_flags
 from jsanalyze.analyzers.framework import detect_framework
 from jsanalyze.analyzers.graphql import extract_graphql
@@ -146,6 +147,7 @@ def analyze(
     src_dir = run.dir / "sources"
     extra_urls = _safe("linkfinder", lambda: linkfinder_endpoints(all_items, cfg=cfg), issues, [])
     extra_urls += _safe("atob", lambda: decode_atob_endpoints(all_items), issues, [])
+    extra_urls += _safe("strings", lambda: resolve_string_endpoints(all_items), issues, [])
     tool_secrets = _safe("secrets", lambda: scan_secrets(run.js_dir, all_items, cfg=cfg), issues, [])
     if src_items:
         tool_secrets += _safe("secrets(sources)", lambda: scan_secrets(src_dir, src_items, cfg=cfg), issues, [])

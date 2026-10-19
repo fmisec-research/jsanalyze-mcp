@@ -17,9 +17,12 @@ from jsanalyze.analyzers.callsites import object_keys, request_shape
 from jsanalyze.analyzers.chunks import map_chunks
 from jsanalyze.analyzers.endpoints import _b64decode, _url_like
 from jsanalyze.analyzers.framework import _firebase_configs
+from jsanalyze.analyzers.strings import _build_consts, fold_expr
 from jsanalyze.analyzers.taint import backtrace, discover_html_sinks, sink_arg_idents, source_label
+from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads
 from jsanalyze.leads.scoring import ScoreInputs, score_lead
-from jsanalyze.models import Lead
+from jsanalyze.models import Lead, Triaged
+from jsanalyze.parsers.history import _json_keys_and_gql, _parse_request_fields
 from jsanalyze.utils.normalize import (
     API_CALL, ASSET_PREFIX, SPA_ROUTE, classify_string_kind, endpoint_key, history_key,
     normalize_path,
@@ -141,6 +144,64 @@ def test_firebase_config():
     check("firebase apiKey captured for folding", fcs[0]["apikey"].startswith("AIzaSyFAKE"))
 
 
+def test_string_fold():
+    # round 3 pt 3: jsluice fragments `API + "/admin"` — fold the const back together
+    consts = _build_consts('const API="/api/v2"; var H="https://x.tld";')
+    check("const resolved", consts.get("API") == "/api/v2")
+    check("concat folded to full path", fold_expr('API + "/admin/users"', consts)[0] == "/api/v2/admin/users")
+    check("unresolved ident -> EXPR", fold_expr('H + "/o/" + id', consts) == ("https://x.tld/o/EXPR", True))
+    check("pure literals not marked used_ident", fold_expr('"/a" + "/b"', consts)[1] is False)
+
+
+def test_request_body_parse():
+    # round 3 pt 1: the <request> blob the operator sent — parse query + body keys + gql op
+    req = (b"POST /api/v1/users?expand=1 HTTP/1.1\r\nContent-Type: application/json\r\n\r\n"
+           b'{"role":"admin","locale":"en"}')
+    q, b, g = _parse_request_fields(req)
+    check("sent query key parsed", q == {"expand"})
+    check("sent body keys parsed", b == {"role", "locale"})
+    check("no gql on plain json", g == set())
+    gb, gg = _json_keys_and_gql({"query": "mutation DeleteUser($id:ID!){x}",
+                                 "operationName": "DeleteUser", "variables": {"id": "1"}})
+    check("gql op extracted", gg == {"DeleteUser"})
+    check("gql variables as body keys", gb == {"id"})
+
+
+def test_body_delta():
+    # round 3 pt 1: an authz/money field the bundle can send but was never sent -> a lead;
+    # a benign field (locale) stays silent; a mutation never POSTed -> graphql-unsent
+    tri = Triaged(
+        endpoints=[{"host": "", "norm_path": "/api/v1/users/{id}", "path": "/api/v1/users/42",
+                    "method": "PATCH", "body_keys": ["role", "locale"], "query": [],
+                    "party": "first", "in_scope": True, "where_found": "a.js:3"}],
+        graphql=[{"operation": "mutation", "operationName": "DeleteUser", "variables": ["$id"],
+                  "file": "a.js", "party": "first"}],
+    )
+    hist = {"sent": {("", "/api/v1/users/{id}"): {"body": {"locale"}, "query": set(), "gql": set()},
+                     ("", "/graphql"): {"body": set(), "query": set(), "gql": {"GetUser"}}}}
+    pairs = _body_delta_leads(tri, hist)
+    classes = {ld.cls for ld, _ in pairs}
+    bf = [ld for ld, _ in pairs if ld.cls == "body-field-unsent"]
+    check("body-field-unsent emitted", bool(bf))
+    check("authz field 'role' flagged, benign 'locale' not",
+          bf and bf[0].body_keys == ["role"])
+    check("unsent graphql mutation flagged", "graphql-unsent" in classes)
+
+
+def test_untraced_cap():
+    # round 3 pt 2: cap untraced sinks and require a non-empty chain
+    def _cluster(i, chain):
+        return {"sink_class": "html", "kind": "innerHTML", "party": "first", "untraced": True,
+                "lead": False, "caller_chain": chain, "count": 1,
+                "occurrences": [{"file": "a.js", "line": i, "source": "el.innerHTML=x"}]}
+    sinks = [_cluster(i, ["x = f()"]) for i in range(8)] + [_cluster(99, [])]
+    tri = Triaged(sinks=sinks)
+    leads = [ld for ld, _ in _sink_leads(tri, set())]
+    unt = [l for l in leads if l.cls == "sink-untraced"]
+    check("untraced capped at 5", len(unt) == 5)
+    check("empty-chain untraced excluded", all(l.line != 99 for l in unt))
+
+
 def test_scoring():
     base = dict(id="", cls="idor-candidate", title="", suggested_skill="hunt-idor",
                 severity_hint="medium", confidence="medium")
@@ -165,7 +226,8 @@ def test_scoring():
 def main() -> int:
     for fn in (test_normalize, test_callsites, test_taint, test_taint_minified,
                test_source_tightened, test_new_sinks, test_atob, test_chunk_runtime_missing,
-               test_firebase_config, test_scoring):
+               test_firebase_config, test_string_fold, test_request_body_parse,
+               test_body_delta, test_untraced_cap, test_scoring):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

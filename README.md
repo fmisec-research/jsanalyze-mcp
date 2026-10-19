@@ -135,7 +135,7 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `libs.json` | Vulnerable libraries (retire.js): component, version, CVE, CWE, severity. |
 | `flags.json` `routes.json` `storage.json` `graphql.json` `chunks.json` `framework.json` | The judgment layer the tool computes: SDK/UI feature flags, SPA routes, localStorage/cookie writes, GraphQL operations, webpack/Vite chunk map (present/missing, with **reconstructed URLs** for webpack4 `webpackJsonp` + Vite), detected framework (+ XSS/pollution gadgets). |
 | `csp.json` | CSP `connect-src`/`frame-src`/… hosts parsed from the HTML response headers in the same capture (zero network) — internal/framed hosts the app is allowed to reach. |
-| `history.json` | The requests the operator ACTUALLY sent (every Burp/HAR item's method+URL, normalized). Drives the **JS-vs-traffic delta** (PATH-first: an endpoint with no method still matches a `GET`). "API exercised" needs a real backend call — assets, the site root and static HTML don't count — so a passive page-load capture never paints the whole bundle as untested surface. |
+| `history.json` | The requests the operator ACTUALLY sent — method+URL **and the decoded `<request>` body / HAR postData** (body keys, query keys, GraphQL op). Drives the **JS-vs-traffic delta** (PATH-first: an endpoint with no method still matches a `GET`), the **body delta** (`body-field-unsent`), and GraphQL-op coverage. "API exercised" needs a real backend call — assets, the site root and static HTML don't count — so a passive page-load capture never paints the whole bundle as untested surface. |
 | `source_notes.json` | Comments / mock-data paths / internal hosts / credentials mined from recovered `sources/` (sourcemap archaeology jsluice ignores). |
 | `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads); each un-recovered external `.map` becomes a `sourcemap` lead (fetch = Operator Gate). |
 | `issues.json` | Enricher/jsluice failures (surfaced, not swallowed). |
@@ -158,6 +158,8 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `vulnerable-library` | retire.js (CWE-driven; **low** until the vulnerable fn is proven called) | `hunt-xss`(79)/`hunt-injection`(89)/`hunt-server-side`(77/78/94/502)/`hunt-js-analysis` |
 | `websocket` | `ws(s)://` · `/websocket` · socket.io | `hunt-websocket` |
 | `endpoint-unverified` | in-scope API in the bundle but **never in captured traffic** | `hunt-api` |
+| `body-field-unsent` | an **authz/money** body/query field (`role`·`isAdmin`·`plan`·`price`·`owner`·`tenant`…) the bundle can send but the operator **never did** (joins JS `body_keys` with the real `<request>` body) | `hunt-api` |
+| `graphql-unsent` | a GraphQL operation in the bundle never seen in a sent POST (one `POST /graphql` ≠ every operation tested) | `hunt-graphql` |
 | `endpoint-hidden` | first-party SPA route with no fetch equivalent, not in traffic | `hunt-api` |
 | `token-storage` | token/jwt/session/`*_token` written to cookie/localStorage | `hunt-auth-bypass` |
 | `graphql-operation` | a parsed query/mutation (variables = body_keys) | `hunt-graphql` |

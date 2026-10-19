@@ -218,6 +218,37 @@
   },
   {
     "id": "lead-0008",
+    "title": "idor-candidate — GET /v1/users/EXPR/orders/123",
+    "suggested_skill": "hunt-idor",
+    "source_file": "app.4f2a.js__6cb6251497.js",
+    "origin_url": null,
+    "line": 3,
+    "evidence": "GET /v1/users/EXPR/orders/123",
+    "detector": "strings:urls",
+    "tainted": null,
+    "confidence": "medium",
+    "severity_hint": "medium",
+    "next_step": "Two accounts A/B: request this object with account B using A's identifier (and the reverse), with a negative control. A cross-account read/write is the proof — a single account proves nothing. (hunt-idor)",
+    "notes": "resource id (users/expr); party=first; in_scope=True; kind=api; dynamic(EXPR).",
+    "score": 8.3,
+    "score_factors": [
+      "sev:medium=3",
+      "+conf:medium",
+      "+first_party",
+      "+in_scope",
+      "+id_segment",
+      "+secret_nearby"
+    ],
+    "seen_in_history": null,
+    "caller_chain": [],
+    "body_keys": [],
+    "method": "GET",
+    "negative_control": "Account B must get 403/404 (not the object) when replaying A's id — a negative control proves isolation.",
+    "experiment": "Replay `GET /v1/users/EXPR/orders/123` from account B using account A's identifier (+ reverse); a cross-account read/write is the proof.",
+    "class": "idor-candidate"
+  },
+  {
+    "id": "lead-0009",
     "title": "auth-endpoint — POST /api/v1/auth/reset-password",
     "suggested_skill": "hunt-auth-bypass",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -250,7 +281,7 @@
     "class": "auth-endpoint"
   },
   {
-    "id": "lead-0009",
+    "id": "lead-0010",
     "title": "auth-endpoint — POST /api/v1/auth/login",
     "suggested_skill": "hunt-auth-bypass",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -280,7 +311,7 @@
     "class": "auth-endpoint"
   },
   {
-    "id": "lead-0010",
+    "id": "lead-0011",
     "title": "graphql-candidate — POST /graphql",
     "suggested_skill": "hunt-graphql",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -310,7 +341,7 @@
     "class": "graphql-candidate"
   },
   {
-    "id": "lead-0011",
+    "id": "lead-0012",
     "title": "idor-candidate — GET /api/v0/legacy/export",
     "suggested_skill": "hunt-idor",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -340,7 +371,7 @@
     "class": "idor-candidate"
   },
   {
-    "id": "lead-0012",
+    "id": "lead-0013",
     "title": "websocket — GET /socket",
     "suggested_skill": "hunt-websocket",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -370,7 +401,7 @@
     "class": "websocket"
   },
   {
-    "id": "lead-0013",
+    "id": "lead-0014",
     "title": "Client-side secret (gcpKey)",
     "suggested_skill": "hunt-cloud",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -400,7 +431,7 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0014",
+    "id": "lead-0015",
     "title": "Client-side secret (stripeTestKey)",
     "suggested_skill": "hunt-secrets-disclosure",
     "source_file": "widget.js__6738f2f709.js",
@@ -428,35 +459,6 @@
     "negative_control": "An invalid/rotated key must be rejected; only a live key grants access.",
     "experiment": "Find the request in widget.js__6738f2f709.js that sends it in a key/authorization field; (Operator Gate) test it against that service.",
     "class": "secret-location"
-  },
-  {
-    "id": "lead-0015",
-    "title": "Untraced innerHTML [html] — argument not tied to a source",
-    "suggested_skill": "hunt-xss",
-    "source_file": "app.4f2a.js__6cb6251497.js",
-    "origin_url": null,
-    "line": 33,
-    "evidence": "document.getElementById(\"out\").innerHTML = e.data",
-    "detector": "jsluice:sinks",
-    "tainted": false,
-    "confidence": "low",
-    "severity_hint": "low",
-    "next_step": "A first-party HTML/JS sink whose input the bounded tracer could not tie to a source — confirm by hand whether attacker input reaches it (it may arrive from another chunk the tracer can't cross). (hunt-xss)",
-    "notes": "party=first; occurrences=1; tracer is single-file (no cross-chunk).",
-    "score": 6.0,
-    "score_factors": [
-      "sev:low=2",
-      "+first_party",
-      "+in_scope",
-      "+secret_nearby"
-    ],
-    "seen_in_history": null,
-    "caller_chain": [],
-    "body_keys": [],
-    "method": "",
-    "negative_control": "Not XSS unless an attacker-controlled value actually reaches this argument; a purely internal value is not a finding.",
-    "experiment": "At app.4f2a.js__6cb6251497.js:33, read what feeds `innerHTML`; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.",
-    "class": "sink-untraced"
   },
   {
     "id": "lead-0016",

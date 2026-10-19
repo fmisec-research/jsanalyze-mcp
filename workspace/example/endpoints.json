@@ -184,5 +184,23 @@
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v2/users/me/settings"
+  },
+  {
+    "method": "GET",
+    "path": "/v1/users/EXPR/orders/123",
+    "norm_path": "/v1/users/{id}/orders/{id}",
+    "host": "api.target.tld",
+    "query": [],
+    "body_keys": [],
+    "call_type": "concat",
+    "string_kind": "api",
+    "line": 3,
+    "where_found": "app.4f2a.js__6cb6251497.js:3",
+    "party": "first",
+    "in_scope": true,
+    "dynamic": true,
+    "fetchable": true,
+    "detector": "strings",
+    "url": "https://api.target.tld/v1/users/EXPR/orders/123"
   }
 ]

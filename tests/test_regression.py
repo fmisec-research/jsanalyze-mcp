@@ -24,6 +24,7 @@ import base64
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -35,6 +36,7 @@ from jsanalyze.analyzers.jsluice_wrapper import resolve_jsluice, run_jsluice
 from jsanalyze.analyzers.postmessage import classify_postmessage
 from jsanalyze.analyzers.routes import extract_routes
 from jsanalyze.analyzers.sinks import triage_sinks
+from jsanalyze.analyzers.strings import resolve_string_endpoints
 from jsanalyze.analyzers.storage import scan_storage
 from jsanalyze.enrichers.secret_classify import classify_secrets
 from jsanalyze.leads.lead_engine import build_leads
@@ -69,6 +71,11 @@ var stripeSecret = "sk_live_51ABCDEFGHIJKLMNOPQRSTUV";
 var secretUrl = atob("L2FwaS92MS9zZWNyZXQ");
 new DOMParser().parseFromString(location.search, "text/html");
 var fb = {apiKey:"AIzaSyFAKE0000000000000000000000000000", authDomain:"demo.firebaseapp.com", projectId:"demo-1", databaseURL:"https://demo.firebaseio.com"};
+
+// round 3: body-field the operator never sent, and a const+concat endpoint jsluice fragments
+fetch("/api/v1/users/42", {method:"PATCH", body: JSON.stringify({role: newRole, locale: "en"})});
+const ADMIN_API = "/api/v2";
+fetch(ADMIN_API + "/admin/settings", {method:"GET"});
 """
 
 RUNTIME_JS = r"""
@@ -91,8 +98,14 @@ def _http(body: str, ctype: str, extra_headers: str = "") -> bytes:
     return (hdr + "\r\n").encode() + b"\r\n" + body.encode()
 
 
-def _item(url, host, method, mimetype, ext, body, ctype, extra_headers=""):
+def _item(url, host, method, mimetype, ext, body, ctype, extra_headers="", req_body=None):
     resp = base64.b64encode(_http(body, ctype, extra_headers)).decode()
+    if req_body is not None:
+        target = urlsplit(url).path or "/"
+        req = (f"{method} {target} HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{req_body}")
+        request_el = f'<request base64="true">{base64.b64encode(req.encode()).decode()}</request>'
+    else:
+        request_el = f'<request base64="false">{method} / HTTP/1.1</request>'
     return f"""  <item>
     <url>{url}</url>
     <host ip="10.0.0.1">{host}</host>
@@ -100,7 +113,7 @@ def _item(url, host, method, mimetype, ext, body, ctype, extra_headers=""):
     <status>200</status>
     <mimetype>{mimetype}</mimetype>
     <extension>{ext}</extension>
-    <request base64="false">{method} / HTTP/1.1</request>
+    {request_el}
     <response base64="true">{resp}</response>
   </item>"""
 
@@ -117,6 +130,10 @@ def _build_xml(path: Path) -> None:
         # matching (the JS rows for these carry NO / a different method).
         _item("https://target.tld/api/v1/profile", "target.tld", "GET", "JSON", "", '{"ok":1}', "application/json"),
         _item("https://target.tld/graphql", "target.tld", "POST", "JSON", "", '{"data":{}}', "application/json"),
+        # the operator PATCHed /api/v1/users/42 but sent ONLY {locale} — never the {role}
+        # field the bundle can also send (body-delta -> body-field-unsent on `role`).
+        _item("https://target.tld/api/v1/users/42", "target.tld", "PATCH", "JSON", "", '{"ok":1}',
+              "application/json", req_body='{"locale":"en"}'),
     ]
     xml = '<?xml version="1.0"?>\n<items burpVersion="2024">\n' + "\n".join(items) + "\n</items>\n"
     path.write_text(xml, encoding="utf-8")
@@ -141,6 +158,7 @@ def _run(xml: Path, run):
                   {"url": "/graphql", "type": "stringLiteral", "method": "",
                    "detector": "jsluice", "filename": "main.js", "source_file": "main.js"}]
     extra_urls += decode_atob_endpoints(js_items)        # base64-hidden endpoints
+    extra_urls += resolve_string_endpoints(js_items)     # const+concat folding (round 3 pt 3)
     tri = Triaged(
         endpoints=normalize_endpoints(list(a.urls) + extra_urls, js_items, cfg, SCOPE,
                                       route_paths=[r["path"] for r in routes], history=history),
@@ -295,6 +313,20 @@ def _assert_all(tri, leads, history, csp) -> list:
     # 13) a JS-only capture must NOT look like exercised API surface
     _assert_js_only_history()
     done.append("JS-only capture: known=True but api_known=False (no false 'untested API')")
+
+    # 14) body delta (round 3 pt 1): the bundle can PATCH {role} but the operator sent only
+    #     {locale} -> body-field-unsent on `role` (authz field), locale stays silent
+    bf = by_cls.get("body-field-unsent", [])
+    assert any("role" in (l.get("body_keys") or []) for l in bf), \
+        f"authz field the bundle sends but operator never did not flagged: {bf}"
+    assert not any("locale" in (l.get("body_keys") or []) for l in bf), \
+        "benign field `locale` wrongly promoted"
+    done.append("body delta: bundle sends {role} never in traffic -> body-field-unsent (locale ignored)")
+
+    # 15) string-const folding (round 3 pt 3): const ADMIN_API='/api/v2'; fetch(ADMIN_API+'/admin/settings')
+    folded = [n for n in tri.endpoints if n.get("norm_path") == "/api/v2/admin/settings"]
+    assert folded, f"const+concat endpoint not folded into one path: {[n['norm_path'] for n in tri.endpoints]}"
+    done.append("string folding: ADMIN_API + '/admin/settings' -> /api/v2/admin/settings (one endpoint)")
 
     # scoring sanity: the top lead is not a postMessage listener
     top = sorted(leads, key=lambda l: -float(l.get("score") or 0))[0]

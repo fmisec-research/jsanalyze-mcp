@@ -55,6 +55,16 @@ _SELF_NAV = ("location.href", "location.pathname", "location.origin", "document.
 _STRING_RE = re.compile(r"""(['"`])(?:\\.|(?!\1).)*\1""")
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
+# builtin/DOM calls that are NOT a "missing helper" if absent from the capture
+_NOISE_CALLS = frozenset({
+    "String", "Number", "Boolean", "Array", "Object", "JSON", "parse", "stringify",
+    "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI", "escape",
+    "unescape", "getElementById", "querySelector", "querySelectorAll", "getAttribute",
+    "createElement", "require", "import", "setTimeout", "setInterval", "fetch", "concat",
+    "slice", "substring", "substr", "replace", "trim", "toString", "map", "join", "split",
+    "if", "for", "while", "switch", "return", "function", "catch", "then",
+})
+
 
 def _sink_class(kind: str) -> str:
     return _SINK_CLASS.get(kind, "html")
@@ -105,6 +115,65 @@ def _prio(sink_class: str) -> tuple:
     }.get(sink_class, ("medium", "medium"))
 
 
+_FN_DECL_RE = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(")
+_FN_ARROW_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*")
+_CALL_NAME_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+_RETURN_RE = re.compile(r"\breturn\b([^;\n}]{1,200})")
+
+
+def _balanced(text: str, open_idx: int) -> int:
+    depth, j = 0, open_idx
+    cap = min(len(text), open_idx + 4000)
+    while j < cap:
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def _fn_index(items) -> "tuple[dict, set]":
+    """Run-wide ONE-LEVEL function index (round 3 pt 4): ``{fname: return_expr}`` for a
+    function's first ``return`` and the set of ALL defined names. Lets the single-file tracer
+    follow a called helper that lives in another chunk exactly one hop — and, when the helper
+    is absent from the capture, say the chain broke at the file boundary instead of faking taint."""
+    returns: dict = {}
+    defined: set = set()
+    for it in items or []:
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for m in _FN_DECL_RE.finditer(text):
+            name = m.group(1)
+            defined.add(name)
+            br = text.find("{", m.end())
+            if br != -1 and br - m.end() < 40:
+                end = _balanced(text, br)
+                if end != -1:
+                    rm = _RETURN_RE.search(text, br, end)
+                    if rm and name not in returns:
+                        returns[name] = rm.group(1).strip()
+        for m in _FN_ARROW_RE.finditer(text):
+            name = m.group(1)
+            defined.add(name)
+            tail = text[m.end():m.end() + 200]
+            if tail[:1] != "{":                          # expression-body arrow: tail IS the return
+                returns.setdefault(name, tail.split(";")[0].split("\n")[0].strip())
+    return returns, defined
+
+
+def _called_names(expr: str) -> list:
+    return [m.group(1) for m in _CALL_NAME_RE.finditer(expr or "")]
+
+
 def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     """Return clustered, classified sink records (for sinks.json). Each has `lead`
     True only for a real-tainted, actionable, non-noise cluster.
@@ -119,6 +188,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     """
     path_to_url = {it.saved_path: it.url for it in (items or []) if getattr(it, "saved_path", None)}
     text_by_base = _text_index(items)
+    fn_returns, fn_defined = _fn_index(items)            # one-hop cross-file index (round 3 pt 4)
     clusters: dict = {}
 
     records = list(sink_records or []) + _discovered_records(items)
@@ -147,6 +217,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         taint_source = taint if real else None
         chain: list = []
         untraced = False
+        crossfile_break = None
 
         # pass 2: bounded backward trace when jsluice saw no direct taint
         if not real and sink_class in ("html", "js", "attr", "url"):
@@ -175,6 +246,21 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                     else:
                         untraced = True
 
+            # one-hop cross-file: a called helper whose RETURN is itself a source (point 4).
+            # Only claims taint when the return LITERALLY reaches a source — never a guess.
+            if untraced:
+                cand = (arg_expr + " " + source + " " + " ".join(chain))
+                for fname in _called_names(cand):
+                    ret = fn_returns.get(fname)
+                    if ret is not None:
+                        lab = source_label(ret)
+                        if lab and (sink_class != "url" or any(tok in lab.lower() for tok in _INJECTABLE)):
+                            real, taint_source, untraced = True, lab, False
+                            chain = chain + [f"{fname}() ⇒ {ret[:60]} (cross-file)"]
+                            break
+                    elif fname not in fn_defined and fname not in _NOISE_CALLS:
+                        crossfile_break = crossfile_break or fname
+
         key = _signature(kind, sink_class, source, real)
         occ = {"file": src_file, "line": rec.get("line"), "source": " ".join(source.split())[:200]}
         cl = clusters.get(key)
@@ -187,7 +273,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                 "sink_class": sink_class, "kind": kind, "party": party,
                 "tainted": tainted, "taint_source": taint_source, "real_taint": real,
                 "lead": lead, "untraced": untraced and not real,
-                "caller_chain": chain,
+                "caller_chain": chain, "crossfile_break": crossfile_break,
                 "detector": "jsluice:sinks" if not rec.get("discovered") else f"taint:{rec.get('framework', 'dom')}",
                 "severity_hint": sev if real else "info",
                 "confidence": conf if real else "low",

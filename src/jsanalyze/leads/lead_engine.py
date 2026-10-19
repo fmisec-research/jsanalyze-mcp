@@ -45,6 +45,19 @@ _TOKEN_KEYS = ("token", "jwt", "access_token", "accesstoken", "refresh", "id_tok
 _ID_KEYS = ("rid", "uid", "userid", "user_id", "account", "accountid", "account_id",
             "tenant", "org", "orgid", "customer", "customerid", "member")
 
+# body/query fields that change AUTHORIZATION or MONEY — the only ones worth a lead when
+# the bundle can send them but the operator never did (critique round 3, point 1). A field
+# like `locale`/`page` stays in the artifact. Matched case-insensitively.
+_AUTHZ_MONEY_KEYS = frozenset({
+    "role", "roles", "isadmin", "is_admin", "admin", "superuser", "is_superuser",
+    "issuperuser", "permission", "permissions", "scope", "scopes", "grant", "grants",
+    "owner", "owner_id", "ownerid", "user_id", "userid", "uid", "account", "account_id",
+    "accountid", "tenant", "tenant_id", "tenantid", "org", "org_id", "orgid",
+    "plan", "tier", "subscription", "price", "amount", "cost", "total", "balance",
+    "credit", "discount", "coupon", "qty", "quantity", "status", "state", "verified",
+    "approved", "enabled", "active",
+})
+
 
 def _is_cloud_secret(kind, data) -> bool:
     try:
@@ -101,6 +114,7 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     pairs += _sink_leads(triaged, secret_files)
     pairs += _pm_leads(triaged, secret_files)
     pairs += _endpoint_leads(triaged, secret_files, api_known)
+    pairs += _body_delta_leads(triaged, history)
     pairs += _hidden_route_leads(triaged, api_paths, api_known)
     pairs += _storage_leads(triaged, secret_files)
     pairs += _graphql_leads(triaged)
@@ -127,8 +141,13 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
 
 
 # --- DOM-XSS sinks ------------------------------------------------------------
+_UNTRACED_CAP = 5            # a React bundle has dozens of untraced dangerouslySetInnerHTML;
+                             # keep the queue short — the rest stay in sinks.json for audit.
+
+
 def _sink_leads(triaged, secret_files):
     out = []
+    untraced = []
     for c in getattr(triaged, "sinks", []) or []:
         f, line, src = _first_occ(c)
         extra = f" (+{c['count'] - 1} more)" if c.get("count", 1) > 1 else ""
@@ -153,30 +172,38 @@ def _sink_leads(triaged, secret_files):
             out.append((ld, ScoreInputs(party=party, in_scope=True,
                                         secret_nearby=f in secret_files)))
             continue
-        # an untraced FIRST/THIRD-party html/js sink whose argument is an identifier is a
-        # low-confidence audit lead, NOT silence (round 2, point 2): the tracer is bounded
-        # to one file, so a helper in another chunk is invisible — say so, don't fake taint.
-        if c.get("untraced") and party != "vendor" and c.get("sink_class") in ("html", "js"):
-            ld = Lead(
-                id="", cls="sink-untraced", suggested_skill="hunt-xss",
-                title=f"Untraced {c.get('kind')} [{c.get('sink_class')}] — argument not tied to a source",
-                source_file=f, line=line, evidence=src,
-                detector=c.get("detector", "jsluice:sinks"),
-                tainted=False, confidence="low", severity_hint="low",
-                caller_chain=chain,
-                next_step="A first-party HTML/JS sink whose input the bounded tracer could not "
-                          "tie to a source — confirm by hand whether attacker input reaches it "
-                          "(it may arrive from another chunk the tracer can't cross). (hunt-xss)",
-                negative_control="Not XSS unless an attacker-controlled value actually reaches this "
-                                 "argument; a purely internal value is not a finding.",
-                experiment=f"At {f}:{line}, read what feeds `{c.get('kind')}`; if it is reachable "
-                           f"from location/postMessage/storage (possibly via another file), build "
-                           f"the browser PoC — else drop it.",
-                notes=f"party={party}; occurrences={c.get('count')}{extra}; "
-                      f"tracer is single-file (no cross-chunk).",
-            )
-            out.append((ld, ScoreInputs(party=party, in_scope=True,
-                                        secret_nearby=f in secret_files)))
+        # an untraced FIRST/THIRD-party html/js sink is a LOW audit lead, NOT silence — but
+        # ONLY when the tracer got somewhere (caller_chain non-empty), and CAPPED per run, or a
+        # React bundle's dozens of dangerouslySetInnerHTML would flood the queue (round 3 pt 2).
+        elif (c.get("untraced") and party != "vendor" and c.get("sink_class") in ("html", "js")
+              and chain):
+            untraced.append((c, f, line, src, extra, chain, party))
+
+    # keep the strongest few untraced sinks (longest chain first = most worth a human look)
+    untraced.sort(key=lambda t: (-len(t[5]), -(t[0].get("count") or 1)))
+    for c, f, line, src, extra, chain, party in untraced[:_UNTRACED_CAP]:
+        ld = Lead(
+            id="", cls="sink-untraced", suggested_skill="hunt-xss",
+            title=f"Untraced {c.get('kind')} [{c.get('sink_class')}] — argument not tied to a source",
+            source_file=f, line=line, evidence=src,
+            detector=c.get("detector", "jsluice:sinks"),
+            tainted=False, confidence="low", severity_hint="low",
+            caller_chain=chain,
+            next_step="A first-party HTML/JS sink whose input the bounded tracer could not tie to a "
+                      "source — confirm by hand whether attacker input reaches it (it may arrive "
+                      "from another chunk the tracer can't cross). (hunt-xss)",
+            negative_control="Not XSS unless an attacker-controlled value actually reaches this "
+                             "argument; a purely internal value is not a finding.",
+            experiment=f"At {f}:{line}, read what feeds `{c.get('kind')}`; if it is reachable from "
+                       f"location/postMessage/storage (possibly via another file), build the browser "
+                       f"PoC — else drop it.",
+            notes=(f"party={party}; occurrences={c.get('count')}{extra}; "
+                   + (f"chain breaks at a file boundary — helper `{c.get('crossfile_break')}()` "
+                      f"is not in this capture (capture its chunk to continue the trace); "
+                      if c.get("crossfile_break") else "tracer is single-file (no cross-chunk); ")
+                   + f"{len(untraced)} untraced sinks total, showing top {_UNTRACED_CAP}."),
+        )
+        out.append((ld, ScoreInputs(party=party, in_scope=True, secret_nearby=f in secret_files)))
     return out
 
 
@@ -309,6 +336,98 @@ def _has_id_shape(n) -> bool:
         return True
     segs = [s for s in (n.get("norm_path") or "").split("/") if s]
     return "{id}" in segs
+
+
+# --- body/query/GraphQL-op delta vs the request the operator ACTUALLY sent ----
+def _body_delta_leads(triaged, history):
+    """Fields the BUNDLE can send that were NEVER in the captured traffic (round 3 pt 1).
+
+    This is the one signal a crawler/other JS tool cannot reproduce: it joins the call-site
+    ``body_keys``/``query`` from the JS with the body the OPERATOR actually sent (now parsed
+    from the Burp ``<request>`` / HAR postData). An authz/money field present in the bundle's
+    call but absent from every sent request to that path = an untested mass-assignment / price
+    / tenant vector. GraphQL operations in the bundle never seen in a sent POST become leads
+    too (one POST /graphql no longer marks every mutation 'exercised')."""
+    out = []
+    if not isinstance(history, dict):
+        return out
+    sent = history.get("sent") or {}
+    if not sent:
+        return out
+    seen = set()
+    for n in getattr(triaged, "endpoints", []) or []:
+        host, npath = n.get("host") or "", n.get("norm_path") or ""
+        entry = sent.get((host, npath)) or sent.get(("", npath))
+        if not entry:
+            continue                                   # path never sent -> endpoint-unverified's job
+        jbody = {k.lower() for k in (n.get("body_keys") or [])}
+        jquery = {q.lower() for q in (n.get("query") or [])}
+        unsent_body = sorted({k for k in jbody if k in _AUTHZ_MONEY_KEYS
+                              and k not in {s.lower() for s in entry["body"]}})
+        unsent_query = sorted({q for q in jquery if q in _AUTHZ_MONEY_KEYS
+                               and q not in {s.lower() for s in entry["query"]}})
+        if not (unsent_body or unsent_query):
+            continue
+        key = (npath, tuple(unsent_body), tuple(unsent_query))
+        if key in seen:
+            continue
+        seen.add(key)
+        method = n.get("method") or ""
+        ev = f"{method} {n.get('path')}".strip()
+        fields = unsent_body + [f"?{q}" for q in unsent_query]
+        ld = Lead(
+            id="", cls="body-field-unsent", suggested_skill="hunt-api",
+            title=f"Bundle can send {fields} to {ev} — never sent in captured traffic",
+            source_file=(n.get("where_found") or "").split(":")[0], line=n.get("line"),
+            evidence=ev, detector="history:body-delta", confidence="low", severity_hint="medium",
+            method=method, body_keys=unsent_body, seen_in_history=True,
+            next_step="The client code builds this request with an authorization/money field the "
+                      "operator never submitted — replay it WITH that field (mass-assignment/BOPLA, "
+                      "price/quantity tamper, tenant/owner swap) and compare vs the control. (hunt-api)",
+            negative_control="The server must ignore/reject the injected field; a changed object, "
+                             "role, price or tenant in the response is the bug.",
+            experiment=f"Replay `{ev}` adding {fields} (start on your OWN object); a persisted change "
+                       f"to a field you should not control proves it.",
+            notes=f"party={n.get('party')}; sent_body={sorted(entry['body'])[:8]}; "
+                  f"bundle_body={sorted(jbody)[:8]}.",
+        )
+        out.append((ld, ScoreInputs(party=n.get("party", "first"), in_scope=n.get("in_scope"),
+                                    has_id_segment=_has_id_shape(n))))
+
+    # GraphQL operations in the bundle that were never seen in a sent GraphQL POST
+    sent_gql = set()
+    for e in sent.values():
+        sent_gql.update(x.lower() for x in e.get("gql", set()))
+    if sent_gql:                                       # only when GraphQL was actually exercised
+        for g in getattr(triaged, "graphql", []) or []:
+            if g.get("party") == "third":
+                continue
+            name = (g.get("operationName") or "").strip()
+            if not name or name.lower() in sent_gql:
+                continue
+            key = ("gql", name)
+            if key in seen:
+                continue
+            seen.add(key)
+            op = g.get("operation") or "query"
+            ld = Lead(
+                id="", cls="graphql-unsent", suggested_skill="hunt-graphql",
+                title=f"GraphQL {op} {name} is in the bundle but was never sent",
+                source_file=g.get("file", ""), line=g.get("line"),
+                evidence=f"{op} {name}", detector="history:gql-delta",
+                confidence="low", severity_hint="medium" if op != "query" else "low",
+                body_keys=[v.lstrip("$") for v in (g.get("variables") or [])], seen_in_history=False,
+                next_step="GraphQL was exercised but THIS operation never was — a POST /graphql in "
+                          "traffic does not mean every operation is tested. Send it and test its "
+                          "per-resolver authz with two accounts. (hunt-graphql)",
+                negative_control="With account B's token the operation must not read/mutate A's object.",
+                experiment=f"Send `{op} {name}` authenticated as B using A's id in its variables; a "
+                           f"cross-account effect proves BOLA/BFLA on an untested operation.",
+                notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}.",
+            )
+            out.append((ld, ScoreInputs(party=g.get("party", "first"), in_scope=True,
+                                        has_id_segment=any("id" in v.lower() for v in (g.get("variables") or [])))))
+    return out
 
 
 # --- hidden SPA routes (no fetch equivalent, not in history) ------------------

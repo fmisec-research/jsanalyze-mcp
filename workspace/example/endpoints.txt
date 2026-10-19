@@ -6,4 +6,5 @@
 /api/v2/users/me/settings
 /graphql
 https://api.target.tld/v1
+https://api.target.tld/v1/users/EXPR/orders/123
 wss://api.target.tld/socket

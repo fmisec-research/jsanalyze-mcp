@@ -34,13 +34,19 @@ do not claim ``seen_in_history`` (or emit ``endpoint-unverified``) without it.
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from jsanalyze.parsers.burp_parser import (
+    _decode_body, _header_value, _maybe_b64, _split_http,
+)
 from jsanalyze.utils.normalize import history_key, looks_like_asset_path, normalize_path
 
 __all__ = ["collect_history"]
+
+_GQL_OP_RE = re.compile(r"\b(?:query|mutation|subscription)\s+([A-Za-z_]\w*)")
 
 
 def _in_scope(host: str, scope_hosts) -> bool:
@@ -66,11 +72,75 @@ def _entry(method: str, url: str):
     }
 
 
+def _json_keys_and_gql(obj) -> "tuple[set, set]":
+    """Top-level body keys, and GraphQL operation names if this is a GraphQL POST.
+
+    A GraphQL body is ``{"query":"…","operationName":"X","variables":{…}}`` — its real
+    'fields' are the variables + the operation name, not the literal keys query/variables.
+    """
+    bkeys: set = set()
+    gql: set = set()
+    if isinstance(obj, dict):
+        if "query" in obj and isinstance(obj.get("query"), str) and (
+                "operationName" in obj or "variables" in obj or _GQL_OP_RE.search(obj["query"])):
+            op = obj.get("operationName")
+            if isinstance(op, str) and op:
+                gql.add(op)
+            else:
+                gql.update(_GQL_OP_RE.findall(obj["query"]))
+            if isinstance(obj.get("variables"), dict):
+                bkeys.update(str(k) for k in obj["variables"].keys())
+        else:
+            bkeys.update(str(k) for k in obj.keys())
+    elif isinstance(obj, list) and obj and isinstance(obj[0], dict):
+        bkeys.update(str(k) for k in obj[0].keys())
+    return bkeys, gql
+
+
+def _parse_request_fields(req_bytes: bytes) -> "tuple[set, set, set]":
+    """(query_keys, body_keys, gql_ops) actually present in a captured request — zero
+    network, reusing the same HTTP decoder as the response path."""
+    qkeys: set = set()
+    bkeys: set = set()
+    gql: set = set()
+    if not req_bytes:
+        return qkeys, bkeys, gql
+    try:
+        line, headers, body = _split_http(req_bytes)
+        body = _decode_body(body, headers)
+        target = line.split(" ", 2)[1] if " " in line else ""
+        for kv in urlsplit(target).query.split("&"):
+            if kv:
+                qkeys.add(kv.split("=", 1)[0])
+        text = body.decode("utf-8", "replace").strip() if body else ""
+        ctype = (_header_value(headers, "Content-Type") or "").lower()
+        if text and ("json" in ctype or text[:1] in "{["):
+            try:
+                bkeys, gql = _json_keys_and_gql(json.loads(text))
+            except (ValueError, TypeError):
+                pass
+        elif text and ("form-urlencoded" in ctype or ("=" in text and "{" not in text)):
+            for kv in text.split("&"):
+                if "=" in kv:
+                    bkeys.add(kv.split("=", 1)[0])
+    except Exception:
+        pass
+    return qkeys, bkeys, gql
+
+
+def _add_sent(out, host, norm, qkeys, bkeys, gql) -> None:
+    for h in (host, ""):
+        e = out["sent"].setdefault((h, norm), {"query": set(), "body": set(), "gql": set()})
+        e["query"].update(qkeys)
+        e["body"].update(bkeys)
+        e["gql"].update(gql)
+
+
 def collect_history(path, scope_hosts=None) -> dict:
     p = Path(path)
     out = {"known": False, "api_known": False, "count": 0, "keys": set(),
            "path_keys": set(), "api_path_keys": set(), "methods": {},
-           "entries": [], "hosts": []}
+           "sent": {}, "entries": [], "hosts": []}
     try:
         suf = p.suffix.lower()
         if p.is_dir():
@@ -95,10 +165,10 @@ def collect_history(path, scope_hosts=None) -> dict:
 
 def _record(out, method, url, scope_hosts):
     if not url:
-        return
+        return None
     e = _entry(method, url)
     if not _in_scope(e["host"], scope_hosts):
-        return
+        return None
     out["entries"].append(e)
     m, host, norm = e["method"], e["host"], e["norm"]
     key = history_key(method, url)
@@ -118,6 +188,7 @@ def _record(out, method, url, scope_hosts):
         out["methods"].setdefault((h, norm), set()).add(m)
         if is_api:
             out["api_path_keys"].add((h, norm))
+    return e
 
 
 def _from_xml(xml_path, scope_hosts, out) -> None:
@@ -126,8 +197,45 @@ def _from_xml(xml_path, scope_hosts, out) -> None:
             continue
         method = (el.findtext("method") or "").strip()
         url = (el.findtext("url") or "").strip()
+        # the <request> blob carries the body the operator ACTUALLY sent — jsluice/jxscout
+        # never see authenticated traffic; we do. Parse it before clearing the element.
+        req_bytes = _maybe_b64(el.find("request"))
         el.clear()
-        _record(out, method, url, scope_hosts)
+        e = _record(out, method, url, scope_hosts)
+        if e is not None and req_bytes:
+            q, b, g = _parse_request_fields(req_bytes)
+            if q or b or g:
+                _add_sent(out, e["host"], e["norm"], q, b, g)
+
+
+def _har_postdata_fields(req) -> "tuple[set, set, set]":
+    pd = req.get("postData") if isinstance(req, dict) else None
+    if not isinstance(pd, dict):
+        return set(), set(), set()
+    qkeys: set = set()
+    for kv in urlsplit(req.get("url", "")).query.split("&"):
+        if kv:
+            qkeys.add(kv.split("=", 1)[0])
+    bkeys: set = set()
+    gql: set = set()
+    params = pd.get("params")
+    if isinstance(params, list):
+        bkeys.update(str(p.get("name")) for p in params if isinstance(p, dict) and p.get("name"))
+    text = pd.get("text")
+    mime = (pd.get("mimeType") or "").lower()
+    if isinstance(text, str) and text.strip():
+        t = text.strip()
+        if "json" in mime or t[:1] in "{[":
+            try:
+                bkeys2, gql = _json_keys_and_gql(json.loads(t))
+                bkeys.update(bkeys2)
+            except (ValueError, TypeError):
+                pass
+        elif "form-urlencoded" in mime or ("=" in t and "{" not in t):
+            for kv in t.split("&"):
+                if "=" in kv:
+                    bkeys.add(kv.split("=", 1)[0])
+    return qkeys, bkeys, gql
 
 
 def _from_har(har_path, scope_hosts, out) -> None:
@@ -135,7 +243,11 @@ def _from_har(har_path, scope_hosts, out) -> None:
         har = json.load(fh)
     for ent in har.get("log", {}).get("entries", []) or []:
         req = ent.get("request", {}) if isinstance(ent, dict) else {}
-        _record(out, req.get("method", ""), req.get("url", ""), scope_hosts)
+        e = _record(out, req.get("method", ""), req.get("url", ""), scope_hosts)
+        if e is not None:
+            q, b, g = _har_postdata_fields(req)
+            if q or b or g:
+                _add_sent(out, e["host"], e["norm"], q, b, g)
 
 
 def _looks_like_xml(p: Path) -> bool:

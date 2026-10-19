@@ -225,7 +225,13 @@ def _locate_line(text: str, url: str, path: str) -> "int | None":
 
 
 def _locators(url: str, path: str):
+    # try the COMPLETE quoted literal first ("…"/'…'/`…`) so a URL that is a PREFIX of a
+    # longer one (``/users/42`` inside ``/users/42/orders``) lands on its OWN call site,
+    # not the first substring match — otherwise request_shape reads the wrong body.
     out = []
+    for lit in (url, path):
+        if lit and lit != "/":
+            out.extend([f'"{lit}"', f"'{lit}'", f"`{lit}`"])
     if url:
         out.append(url)
     if path and path != "/":

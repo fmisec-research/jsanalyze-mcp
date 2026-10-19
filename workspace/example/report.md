@@ -1,8 +1,8 @@
 # JS Analysis — target.tld, api.target.tld (2026-10-19_example)
 
 ## Ringkasan
-- JS: 4 | Endpoints: 9 fetchable/10 | Sinks: 1 lead/2 | Secrets: 5 | Vuln libs: 1 | postMessage: 1 lead/1 | Flags: 0 | Routes: 0 | Storage: 0 | GraphQL: 0 | CSP hosts: 0 | Missing chunks: 1 | Source notes: 0 | Leads: 17
-- Leads per skill: hunt-xss: 4, hunt-secrets-disclosure: 3, hunt-cloud: 2, hunt-idor: 2, hunt-auth-bypass: 2, hunt-api: 1, hunt-graphql: 1, hunt-websocket: 1, hunt-js-analysis: 1
+- JS: 4 | Endpoints: 10 fetchable/11 | Sinks: 1 lead/2 | Secrets: 5 | Vuln libs: 1 | postMessage: 1 lead/1 | Flags: 0 | Routes: 0 | Storage: 0 | GraphQL: 0 | CSP hosts: 0 | Missing chunks: 1 | Source notes: 0 | Leads: 17
+- Leads per skill: hunt-xss: 3, hunt-secrets-disclosure: 3, hunt-idor: 3, hunt-cloud: 2, hunt-auth-bypass: 2, hunt-api: 1, hunt-graphql: 1, hunt-websocket: 1, hunt-js-analysis: 1
 - Framework: jquery
 
 ## Leads prioritas
@@ -29,31 +29,31 @@
 - [lead-0007] **idor-candidate** score=8.3 (medium/medium → hunt-idor) — `GET EXPR/users/EXPR/orders/123` — app.4f2a.js__6cb6251497.js:None
     - experiment: Replay 'GET EXPR/users/EXPR/orders/123' from account B using account A's identifier (+ reverse); a cross-account read/write is the proof.
     - neg-control: Account B must get 403/404 (not the object) when replaying A's id — a negative control proves isolation.
-- [lead-0008] **auth-endpoint** score=7.8 (medium/medium → hunt-auth-bypass) — `POST /api/v1/auth/reset-password` — app.4f2a.js__6cb6251497.js:16
+- [lead-0008] **idor-candidate** score=8.3 (medium/medium → hunt-idor) — `GET /v1/users/EXPR/orders/123` — app.4f2a.js__6cb6251497.js:3
+    - experiment: Replay 'GET /v1/users/EXPR/orders/123' from account B using account A's identifier (+ reverse); a cross-account read/write is the proof.
+    - neg-control: Account B must get 403/404 (not the object) when replaying A's id — a negative control proves isolation.
+- [lead-0009] **auth-endpoint** score=7.8 (medium/medium → hunt-auth-bypass) — `POST /api/v1/auth/reset-password` — app.4f2a.js__6cb6251497.js:16
     - body: {email}
     - experiment: Attack the mechanism at 'POST /api/v1/auth/reset-password' (token forgery / reset race / OAuth redirect_uri).
     - neg-control: The control (current/authorized path or role) must behave differently.
-- [lead-0009] **auth-endpoint** score=7.3 (medium/medium → hunt-auth-bypass) — `POST /api/v1/auth/login` — app.4f2a.js__6cb6251497.js:9
+- [lead-0010] **auth-endpoint** score=7.3 (medium/medium → hunt-auth-bypass) — `POST /api/v1/auth/login` — app.4f2a.js__6cb6251497.js:9
     - experiment: Attack the mechanism at 'POST /api/v1/auth/login' (token forgery / reset race / OAuth redirect_uri).
     - neg-control: The control (current/authorized path or role) must behave differently.
-- [lead-0010] **graphql-candidate** score=7.3 (medium/medium → hunt-graphql) — `POST /graphql` — app.4f2a.js__6cb6251497.js:19
+- [lead-0011] **graphql-candidate** score=7.3 (medium/medium → hunt-graphql) — `POST /graphql` — app.4f2a.js__6cb6251497.js:19
     - experiment: Fingerprint + attempt introspection at 'POST /graphql', then per-resolver authz (node(id:)).
     - neg-control: The control (current/authorized path or role) must behave differently.
-- [lead-0011] **idor-candidate** score=7.3 (medium/medium → hunt-idor) — `GET /api/v0/legacy/export` — app.4f2a.js__6cb6251497.js:25
+- [lead-0012] **idor-candidate** score=7.3 (medium/medium → hunt-idor) — `GET /api/v0/legacy/export` — app.4f2a.js__6cb6251497.js:25
     - experiment: Replay 'GET /api/v0/legacy/export' from account B using account A's identifier (+ reverse); a cross-account read/write is the proof.
     - neg-control: Account B must get 403/404 (not the object) when replaying A's id — a negative control proves isolation.
-- [lead-0012] **websocket** score=7.3 (medium/medium → hunt-websocket) — `GET /socket` — app.4f2a.js__6cb6251497.js:26
+- [lead-0013] **websocket** score=7.3 (medium/medium → hunt-websocket) — `GET /socket` — app.4f2a.js__6cb6251497.js:26
     - experiment: Test CSWSH on 'GET /socket' (cross-origin handshake with the victim cookie) and per-message authz.
     - neg-control: The control (current/authorized path or role) must behave differently.
-- [lead-0013] **secret-location** score=7.3 (medium/medium → hunt-cloud) — `{"key": "AIza…[REDACTED]…uv"}` — app.4f2a.js__6cb6251497.js:30
+- [lead-0014] **secret-location** score=7.3 (medium/medium → hunt-cloud) — `{"key": "AIza…[REDACTED]…uv"}` — app.4f2a.js__6cb6251497.js:30
     - experiment: Find the request in app.4f2a.js__6cb6251497.js that sends it in a key/authorization field; (Operator Gate) test it against that service.
     - neg-control: An invalid/rotated key must be rejected; only a live key grants access.
-- [lead-0014] **secret-location** score=7.3 (medium/medium → hunt-secrets-disclosure) — `{"match": "sk_t…[REDACTED]…wx", "pattern": "stripeTestKey"}` — widget.js__6738f2f709.js:4
+- [lead-0015] **secret-location** score=7.3 (medium/medium → hunt-secrets-disclosure) — `{"match": "sk_t…[REDACTED]…wx", "pattern": "stripeTestKey"}` — widget.js__6738f2f709.js:4
     - experiment: Find the request in widget.js__6738f2f709.js that sends it in a key/authorization field; (Operator Gate) test it against that service.
     - neg-control: An invalid/rotated key must be rejected; only a live key grants access.
-- [lead-0015] **sink-untraced** score=6.0 (low/low → hunt-xss) — `document.getElementById("out").innerHTML = e.data` — app.4f2a.js__6cb6251497.js:33
-    - experiment: At app.4f2a.js__6cb6251497.js:33, read what feeds 'innerHTML'; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.
-    - neg-control: Not XSS unless an attacker-controlled value actually reaches this argument; a purely internal value is not a finding.
 - [lead-0016] **sourcemap** score=5.0 (low/low → hunt-js-analysis) — `https://target.tld/static/js/app.4f2a.js.map` — app.4f2a.js__6cb6251497.js:None
     - experiment: Operator-gated: if authorized, fetch 'https://target.tld/static/js/app.4f2a.js.map' and mine sourcesContent for staging hosts, mock/dummyData paths, comments and secrets not in the bundle.
     - neg-control: (recon) — a .map only yields leads if it carries sourcesContent (original comments/paths/secrets absent from the minified bundle).
@@ -73,6 +73,7 @@
 | GET | wss://api.target.tld/socket | first | True | websocket |
 | GET | /api/v1/profile/me | first | True | fetch |
 | GET | /api/v2/users/me/settings | vendor | True | fetch |
+| GET | https://api.target.tld/v1/users/EXPR/orders/123 | first | True | concat |
 
 _1 non-fetchable/dynamic kept in endpoints.json_
 
