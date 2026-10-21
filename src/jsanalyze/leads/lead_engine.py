@@ -61,6 +61,12 @@ _AUTHZ_MONEY_KEYS = frozenset({
     "returnurl", "return_url", "callback", "callback_url", "next", "group_id", "groupid",
     "company_id", "companyid", "workspace_id", "workspaceid", "team_id", "teamid",
 })
+# money fields whose VALUE coming from the client at all (even if sent) is a business-logic
+# smell — the server, not the browser, should price things (round 5 pt 18).
+_MONEY_KEYS = frozenset({"price", "unit_price", "unitprice", "total", "subtotal", "amount",
+                         "cost", "discount", "qty", "quantity", "points", "credit", "balance"})
+_UNVERIFIED_CAP = 15        # big SPAs have hundreds of bundle paths; keep the queue readable
+_GQL_UNSENT_CAP = 10
 
 
 def _is_cloud_secret(kind, data) -> bool:
@@ -147,6 +153,7 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     pairs += _gadget_leads(triaged, secret_files)
     pairs += _secret_leads(triaged, mask, secret_files)
     pairs += _vuln_sink_leads(triaged)
+    pairs += _response_leads(triaged, auth_hint)
     pairs += _lib_leads(triaged)
     pairs += _flag_leads(triaged)
 
@@ -179,6 +186,28 @@ def _sink_leads(triaged, secret_files):
         party = c.get("party", "first")
         if c.get("lead"):
             taint_src = c.get("taint_source") or (chain[0] if chain else "attacker input")
+            if c.get("redirect"):
+                # a tainted navigation target with no javascript:/data: scheme is an OPEN REDIRECT
+                ld = Lead(
+                    id="", cls="open-redirect", suggested_skill="hunt-open-redirect",
+                    title=f"Open redirect — {c.get('kind')} navigation tainted by {taint_src}",
+                    source_file=f, line=line, evidence=src, detector=c.get("detector", "jsluice:sinks"),
+                    tainted=True, confidence=c.get("confidence", "medium"),
+                    severity_hint="medium",
+                    caller_chain=chain,
+                    next_step="Attacker input sets a navigation target (location/href/assign). If the "
+                              "scheme is NOT validated, point it off-site (open redirect); if the "
+                              "scheme is also attacker-controlled, `javascript:` makes it DOM-XSS. "
+                              "(hunt-open-redirect)",
+                    negative_control="A same-origin/relative-only target that rejects external schemes "
+                                     "is not a finding.",
+                    experiment=f"At {f}:{line}, set the tainted source ({taint_src}) to an external "
+                               f"https URL and confirm navigation off-origin; then try `javascript:` "
+                               f"for XSS.",
+                    notes=f"party={c.get('party')}; occurrences={c.get('count')}{extra}; url-class sink.",
+                )
+                out.append((ld, ScoreInputs(party=party, in_scope=True, secret_nearby=f in secret_files)))
+                continue
             ld = Lead(
                 id="", cls="xss-sink", suggested_skill="hunt-xss",
                 title=f"DOM-XSS {c.get('kind')} [{c.get('sink_class')}] tainted by {taint_src}",
@@ -276,6 +305,7 @@ def _pm_leads(triaged, secret_files):
 # --- endpoints (classified) + the history delta -------------------------------
 def _endpoint_leads(triaged, secret_files, api_known, auth_hint=""):
     out = []
+    unverified = []                              # capped separately (round 5 pt 21)
     seen_ep = set()
     for n in getattr(triaged, "endpoints", []) or []:
         info = classify_endpoint(n)
@@ -307,10 +337,16 @@ def _endpoint_leads(triaged, secret_files, api_known, auth_hint=""):
             ld = _mk_endpoint_lead(
                 n, "endpoint-unverified", "hunt-api", "low", "low",
                 "in the bundle but absent from captured traffic", src_file, in_hist, auth_hint)
-            out.append((ld, ScoreInputs(
+            si = ScoreInputs(
                 party="first", in_scope=n.get("in_scope"), call_type=n.get("call_type", ""),
                 has_id_segment=has_id, secret_nearby=src_file in secret_files,
-                history_known=api_known)))
+                history_known=api_known)
+            # rank: a privileged/auth path or one with a body/id first, plain reads last
+            priv = bool(n.get("body_keys")) or has_id or any(
+                s in (n.get("norm_path") or "").lower() for s in _PRIV_ROUTE_HINTS)
+            unverified.append((priv, ld, si))
+    unverified.sort(key=lambda t: (not t[0],))
+    out += [(ld, si) for _p, ld, si in unverified[:_UNVERIFIED_CAP]]
     return out
 
 
@@ -388,8 +424,32 @@ def _body_delta_leads(triaged, history, auth_hint=""):
             continue                                   # path never sent -> endpoint-unverified's job
         jbody = {k.lower() for k in (n.get("body_keys") or [])}
         jquery = {q.lower() for q in (n.get("query") or [])}
+        sent_body_lower = {s.lower() for s in entry["body"]}
+        # a money field the CLIENT sends (even if the operator already did) = price/qty tampering
+        money_sent = sorted({k for k in jbody if k in _MONEY_KEYS and k in sent_body_lower})
+        if money_sent:
+            mkey = (n.get("norm_path"), "money", tuple(money_sent))
+            if mkey not in seen:
+                seen.add(mkey)
+                ev = f"{n.get('method') or ''} {n.get('path')}".strip()
+                out.append((Lead(
+                    id="", cls="client-controlled-value", suggested_skill="hunt-business-logic",
+                    title=f"Client sets money field {money_sent} on {ev}",
+                    source_file=(n.get("where_found") or "").split(":")[0], line=n.get("line"),
+                    evidence=ev, detector="history:body-delta", confidence="low", severity_hint="medium",
+                    method=n.get("method", ""), body_keys=money_sent, seen_in_history=True,
+                    next_step="The browser submits a price/quantity/amount the server should own — "
+                              "tamper it on your OWN order and see if the backend trusts the client "
+                              "value (under-charge / over-credit). (hunt-business-logic)",
+                    negative_control="The server must recompute/validate the amount; if it bills the "
+                                     "client-sent value, that is the bug.",
+                    experiment=(f"Replay `{ev}` with {money_sent} set to an advantageous value on your "
+                                f"own object; a persisted price/total that matches your input proves it."
+                                + (" " + auth_hint if auth_hint else "")),
+                    notes=f"party={n.get('party')}; money field is client-supplied.",
+                ), ScoreInputs(party=n.get("party", "first"), in_scope=n.get("in_scope"))))
         unsent_body = sorted({k for k in jbody if k in _AUTHZ_MONEY_KEYS
-                              and k not in {s.lower() for s in entry["body"]}})
+                              and k not in sent_body_lower})
         unsent_query = sorted({q for q in jquery if q in _AUTHZ_MONEY_KEYS
                                and q not in {s.lower() for s in entry["query"]}})
         if not (unsent_body or unsent_query):
@@ -428,7 +488,12 @@ def _body_delta_leads(triaged, history, auth_hint=""):
     sent_gql = set()
     for e in sent.values():
         sent_gql.update(x.lower() for x in e.get("gql", set()))
-    if sent_gql:                                       # only when GraphQL was actually exercised
+    # persisted queries are sent by HASH, not name — we can't match named ops to traffic, so
+    # suppress graphql-unsent entirely rather than emit false "never sent" leads (round 5 pt 19).
+    persisted = "@persisted" in sent_gql
+    sent_gql.discard("@persisted")
+    gql_pairs = []
+    if sent_gql and not persisted:                     # only when GraphQL was named-exercised
         for g in getattr(triaged, "graphql", []) or []:
             if g.get("party") == "third":
                 continue
@@ -460,8 +525,12 @@ def _body_delta_leads(triaged, history, auth_hint=""):
                             + (" " + auth_hint if auth_hint else "")),
                 notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}{anon_note}.",
             )
-            out.append((ld, ScoreInputs(party=g.get("party", "first"), in_scope=True,
-                                        has_id_segment=any("id" in v.lower() for v in (g.get("variables") or [])))))
+            gql_pairs.append((op != "query", ld,  # mutation/subscription rank first
+                              ScoreInputs(party=g.get("party", "first"), in_scope=True,
+                                          has_id_segment=any("id" in v.lower() for v in (g.get("variables") or [])))))
+    # cap the unsent-GraphQL leads so a big schema doesn't flood the queue (round 5 pt 21)
+    gql_pairs.sort(key=lambda t: (not t[0],))
+    out += [(ld, si) for _mut, ld, si in gql_pairs[:_GQL_UNSENT_CAP]]
     return out
 
 
@@ -846,6 +915,56 @@ def _vuln_sink_leads(triaged):
             experiment=f"At {f}:{line}, feed the public {lib.get('component')}@{lib.get('version')} "
                        f"sanitizer-bypass payload through the user input and confirm script execution.",
             notes=f"retire CVE bound to call site; CVEs={cves}.",
+        )
+        out.append((ld, ScoreInputs(party="first", in_scope=True)))
+    return out
+
+
+def _response_leads(triaged, auth_hint=""):
+    """Leads from what the operator's requests RETURNED (round 5 pts 17 & 20) — data only a
+    Burp/HAR export carries: sensitive fields in a JSON response (over-fetch / token leak,
+    with an IDOR pivot on its id fields) and inline-handler / javascript: sinks in captured HTML."""
+    out = []
+    resp = getattr(triaged, "responses", {}) or {}
+    for r in resp.get("overfetch", []) or []:
+        ev = f"{r.get('method') or 'GET'} {r.get('path')}".strip()
+        sens = r.get("sensitive") or []
+        ids = r.get("ids") or []
+        ld = Lead(
+            id="", cls="response-exposure", suggested_skill="hunt-api",
+            title=f"Response of {ev} returns sensitive fields {sens}",
+            source_file="(captured response)", line=None, evidence=f"{ev} -> {sens}",
+            detector="response:json", confidence="medium", severity_hint="medium",
+            method=r.get("method", ""), seen_in_history=True,
+            next_step=("The server returns sensitive fields to the client (excessive data exposure / "
+                       "over-fetch, API3). Check whether a LOW-priv or OTHER user gets the same fields, "
+                       "and whether the token/secret is reusable. (hunt-api)"
+                       + (f" IDOR pivot on {ids}." if ids else "")),
+            negative_control="Another account must NOT receive account A's sensitive fields; a field "
+                             "the UI never shows but the API returns is the over-fetch.",
+            experiment=(f"Re-request `{ev}` as a second/again lower-priv account (and swap any id in "
+                        f"{ids or 'the path'}); identical sensitive fields for another user prove it."
+                        + (" " + auth_hint if auth_hint else "")),
+            notes=f"host={r.get('host')}; sensitive fields observed in the captured response.",
+        )
+        out.append((ld, ScoreInputs(party="first", in_scope=True,
+                                    has_id_segment=bool(ids))))
+    for h in resp.get("html_sinks", []) or []:
+        kind = h.get("kind")
+        xss = kind == "javascript-uri"
+        ld = Lead(
+            id="", cls="html-sink", suggested_skill="hunt-xss",
+            title=f"HTML {kind} in captured page {h.get('path')}",
+            source_file="(captured HTML)", line=None, evidence=h.get("evidence", ""),
+            detector=f"response:html:{kind}", confidence="low",
+            severity_hint="medium" if xss else "low",
+            next_step=("An inline event handler / javascript: URI in server-rendered HTML — if any "
+                       "part is reflected from user input it is reflected/stored XSS. Find whether the "
+                       "handler/URI carries a parameter you control. (hunt-xss)"),
+            negative_control="A fully static handler with no reflected input is not a finding.",
+            experiment=f"Check whether {h.get('path')} reflects a parameter into `{h.get('evidence','')[:60]}`; "
+                       f"if so, inject a breakout and confirm execution.",
+            notes=f"host={h.get('host')}; from the captured HTML response (jsluice reads only <script>).",
         )
         out.append((ld, ScoreInputs(party="first", in_scope=True)))
     return out

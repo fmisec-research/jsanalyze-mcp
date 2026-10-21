@@ -15,14 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jsanalyze.analyzers.callsites import object_keys, request_shape
 from jsanalyze.analyzers.chunks import map_chunks
+from jsanalyze.analyzers.comment_miner import _CRED_RE, _INTERNAL_HOST_RE, _scan
 from jsanalyze.analyzers.endpoints import _b64decode, _url_like, classify_endpoint
-from jsanalyze.analyzers.framework import _firebase_configs, _scan_gadgets
+from jsanalyze.analyzers.framework import _PROTO_LODASH_RE, _firebase_configs, _scan_gadgets
+from jsanalyze.analyzers.postmessage import _TOKENISH, _origin_strength
+from jsanalyze.analyzers.sinks import _enclosing_fn, _san_component
 from jsanalyze.analyzers.strings import _build_consts, _client_base_map, _join, fold_expr
 from jsanalyze.analyzers.taint import backtrace, discover_html_sinks, sink_arg_idents, source_label
 from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads, _vuln_sink_leads
 from jsanalyze.leads.scoring import ScoreInputs, score_lead
 from jsanalyze.models import Lead, Triaged
 from jsanalyze.parsers.history import _json_keys_and_gql, _parse_request_fields
+from jsanalyze.parsers.responses import _SENSITIVE_KEY_RE, _flatten
 from jsanalyze.utils.normalize import normalize_path as _np
 from jsanalyze.utils.normalize import (
     API_CALL, ASSET_PREFIX, SPA_ROUTE, classify_string_kind, endpoint_key, history_key,
@@ -250,6 +254,79 @@ def test_batch_and_multipart():
     check("multipart name parsed as body key", "role" in b)
 
 
+def test_round5_fp_tightening():
+    # 1: a comparison is not an assignment
+    lab, _ = backtrace("if (t == location.hash) {}", ["t"])
+    check("`t == location.hash` is not tainted taint", lab is None)
+    # 2: // inside https:// is not a comment
+    comments, _strings = _scan('var u = "https://internal.corp.example.com/x"; // real note')
+    check("https:// not seen as comment", all("internal.corp" not in c for _p, c in comments))
+    check("real // note still a comment", any("real note" in c for _p, c in comments))
+    # 3: credential needs : or =
+    check("`password resetFlow` not a credential", not _CRED_RE.search("password resetFlow"))
+    check("`password = hunter2xx` is a credential", bool(_CRED_RE.search('password = "hunter2xx"')))
+    # 4: host prefix must be a full label
+    check("device.company.com NOT internal", not _INTERNAL_HOST_RE.search("device.company.com"))
+    check("testing.example.com NOT internal", not _INTERNAL_HOST_RE.search("testing.example.com"))
+    check("dev.example.com IS internal", bool(_INTERNAL_HOST_RE.search("dev.example.com")))
+    # 5: token words are whole-word
+    check("author is not tokenish", not _TOKENISH.search("author"))
+    check("sessionStorage is not tokenish", not _TOKENISH.search("sessionStorage"))
+    check("authToken is tokenish", bool(_TOKENISH.search("authToken")))
+    # 8: sanitizer must be a call
+    check("bare 'marked' word not a sanitizer", _san_component("a marked item") is None)
+    check("DOMPurify.sanitize(x) is a sanitizer", _san_component("el.innerHTML=DOMPurify.sanitize(x)") == "dompurify")
+    # 10: lodash .set is not proto-pollution
+    check("_.set( not proto-pollution", not _PROTO_LODASH_RE.search("_.set(obj, p, v)"))
+    check("_.merge( is proto-pollution", bool(_PROTO_LODASH_RE.search("_.merge(a, b)")))
+    # 11: version2 is not an id segment
+    check("version2 not {id}", _np("/api/version2/users") == "/api/version2/users")
+    check("2-digit opaque id -> {id}", _np("/u/a1b2c3d4") == "/u/{id}")
+
+
+def test_round5_origin():
+    # 6 + 14: only a recognised strong check demotes; weak origin.includes stays a lead
+    check("allowlist.includes(e.origin) is strong",
+          _origin_strength("", None, "if(allowlist.includes(e.origin)){}") == "strong")
+    check("e.origin === literal is strong",
+          _origin_strength("", None, 'if(e.origin === "https://trusted.example"){}') == "strong")
+    check("e.origin.includes('x') is weak",
+          _origin_strength("", None, 'if(e.origin.includes("trusted")){}') == "weak")
+    check("unrelated path.startsWith not an origin check",
+          _origin_strength("", None, 'if(path.startsWith("/api")){}') == "none")
+
+
+def test_round5_crossfile_and_body():
+    # 15: arrow / assigned function is seen by the enclosing-fn resolver
+    txt = "const ye = (e) => { node.innerHTML = e; };"
+    pos = txt.index("innerHTML")
+    enc = _enclosing_fn(txt, pos)
+    check("arrow fn enclosing resolved", enc is not None and enc[0] == "ye" and "e" in enc[1])
+    # 16: body: payload resolves to the object literal in the same file
+    rs = request_shape("const payload = { role, name };\nfetch(u, { body: JSON.stringify(payload) });", 2)
+    check("body var resolved to its object keys", sorted(rs["body_keys"]) == ["name", "role"])
+
+
+def test_round5_persisted_and_response():
+    # 19: a persisted-query send is tagged, not matched by name
+    _b, g = _json_keys_and_gql({"extensions": {"persistedQuery": {"sha256Hash": "abc"}}})
+    check("persisted query tagged", "@persisted" in g)
+    # 17: sensitive response fields detected (nested)
+    keys = _flatten({"user": {"email": "a@b.c", "role": "admin"}, "token": "x", "page": 1})
+    sens = {k for k in keys if _SENSITIVE_KEY_RE.match(k)}
+    check("sensitive response fields found", {"email", "role", "token"} <= sens and "page" not in sens)
+
+
+def test_round5_money_delta():
+    # 18: a money field the client SENDS -> business-logic lead
+    tri = Triaged(endpoints=[{"host": "", "norm_path": "/cart/checkout", "path": "/cart/checkout",
+                              "method": "POST", "body_keys": ["price", "item"], "query": [],
+                              "party": "first", "in_scope": True, "where_found": "a.js:1"}])
+    hist = {"sent": {("", "/cart/checkout"): {"body": {"price", "item"}, "query": set(), "gql": set()}}}
+    classes = {ld.cls for ld, _ in _body_delta_leads(tri, hist)}
+    check("client-controlled money field -> business-logic", "client-controlled-value" in classes)
+
+
 def test_scoring():
     base = dict(id="", cls="idor-candidate", title="", suggested_skill="hunt-idor",
                 severity_hint="medium", confidence="medium")
@@ -277,7 +354,8 @@ def main() -> int:
                test_firebase_config, test_string_fold, test_request_body_parse,
                test_body_delta, test_untraced_cap, test_baseurl_join_and_guard,
                test_supabase_gadget, test_vuln_call_binding, test_batch_and_multipart,
-               test_scoring):
+               test_round5_fp_tightening, test_round5_origin, test_round5_crossfile_and_body,
+               test_round5_persisted_and_response, test_round5_money_delta, test_scoring):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

@@ -47,7 +47,7 @@ from jsanalyze.utils.normalize import history_key, looks_like_asset_path, normal
 __all__ = ["collect_history"]
 
 _GQL_OP_RE = re.compile(r"\b(?:query|mutation|subscription)\s+([A-Za-z_]\w*)")
-_MULTIPART_NAME_RE = re.compile(r'name="([^"\r\n]{1,80})"')
+_MULTIPART_NAME_RE = re.compile(r"""name\s*=\s*["']([^"'\r\n]{1,80})["']""")
 # request headers that are the replay recipe for an endpoint lead (names only; values masked)
 _AUTH_HEADERS = frozenset({
     "authorization", "x-api-key", "x-auth-token", "x-access-token", "x-csrf-token",
@@ -91,6 +91,10 @@ def _json_keys_and_gql(obj, depth: int = 2) -> "tuple[set, set]":
 
     def walk(o, d):
         if isinstance(o, dict):
+            # Apollo persisted query: a POST with only a hash, no operationName — mark it so
+            # the bundle's named ops are NOT falsely reported as "never sent" (round 5 pt 19).
+            if isinstance(o.get("extensions"), dict) and "persistedQuery" in o["extensions"]:
+                gql.add("@persisted")
             if isinstance(o.get("query"), str) and (
                     "operationName" in o or "variables" in o or _GQL_OP_RE.search(o["query"])):
                 op = o.get("operationName")

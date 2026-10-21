@@ -137,6 +137,7 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `csp.json` | CSP `connect-src`/`frame-src`/… hosts parsed from the HTML response headers in the same capture (zero network) — internal/framed hosts the app is allowed to reach. |
 | `history.json` | The requests the operator ACTUALLY sent — method+URL **and the decoded `<request>` body / HAR postData** (body keys incl. nested + multipart, query keys, GraphQL op incl. Apollo batch & GET `?query=`) **and the auth header / session-cookie NAMES** (values masked → the replay recipe). Drives the **JS-vs-traffic delta** (PATH-first: an endpoint with no method still matches a `GET`), the **body delta** (`body-field-unsent`), GraphQL-op coverage, and the per-lead replay hint. "API exercised" needs a real backend call — assets, the site root and static HTML don't count. |
 | `source_notes.json` | Comments / mock-data paths / internal hosts / credentials mined from recovered `sources/` (sourcemap archaeology jsluice ignores). |
+| `responses.json` | What the operator's captured requests RETURNED — JSON responses whose keys include sensitive fields (over-fetch / token leak), and inline-handler / `javascript:` sinks in captured HTML. Only a Burp/HAR export carries this; zero network. |
 | `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads); each un-recovered external `.map` becomes a `sourcemap` lead (fetch = Operator Gate). |
 | `issues.json` | Enricher/jsluice failures (surfaced, not swallowed). |
 | `js/*.js` | Decoded + beautified bodies (line numbers in leads refer here). |
@@ -152,7 +153,11 @@ masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: cluster
 | `api-version` | endpoint `/v0`·`/beta`·`/legacy` | `hunt-api` |
 | `secret-location` | secret (cloud key → `hunt-cloud`) | `hunt-secrets-disclosure` |
 | `cloud-config` | Firebase web config (`apiKey`+`authDomain`+`projectId`/`databaseURL`, lone `AIza` **folded** in) or a Supabase/cloud `createClient(url, anonKey)` — one lead, exposure = the RLS/security rules not the public key | `hunt-cloud` |
-| `xss-sink` | sink — **gated**: real attacker-taint only, clustered | `hunt-xss` |
+| `xss-sink` | sink — **gated**: real attacker-taint only, clustered (url-class → `open-redirect` unless `javascript:`/`data:`) | `hunt-xss` |
+| `open-redirect` | a tainted navigation target (`location`/`href`/`assign`) with no `javascript:`/`data:` scheme | `hunt-open-redirect` |
+| `response-exposure` | a captured JSON response returns sensitive fields (token/role/email/…) — over-fetch (API3) + IDOR pivot on its ids | `hunt-api` |
+| `html-sink` | inline `on*=` handler / `href="javascript:"` in captured HTML (jsluice reads only `<script>`) | `hunt-xss` |
+| `client-controlled-value` | the client sends a money field (`price`/`total`/`amount`/`qty`) the server should own | `hunt-business-logic` |
 | `postmessage-listener` / `-sender` / `-origin-bypass` | postMessage families | `hunt-xss` (/ `hunt-auth-bypass` if token) |
 | `feature-gate` | `ui-gate` flag (isAdmin / plan===) | `hunt-api` |
 | `vulnerable-library` | retire.js (CWE-driven; **low** until the vulnerable fn is proven called) | `hunt-xss`(79)/`hunt-injection`(89)/`hunt-server-side`(77/78/94/502)/`hunt-js-analysis` |

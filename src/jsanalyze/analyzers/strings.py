@@ -19,14 +19,37 @@ import re
 
 __all__ = ["resolve_string_endpoints", "fold_expr"]
 
-# a client bound to a baseURL:  const c = axios.create({ baseURL: "/api/v2" })  |
-# new ApolloClient({ uri: BASE })  |  const cfg = { baseURL: "…" }
+# a client bound to a baseURL:  const c = axios.create({ … })  |  new ApolloClient({ uri })
 _CLIENT_DEF_RE = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
-    r"(?:[A-Za-z_$][\w$.]*\s*\.\s*create|new\s+[A-Za-z_$][\w$.]*)?\s*\(\s*\{([^{}]{0,600})\}")
+    r"(?:[A-Za-z_$][\w$.]*\s*\.\s*create|new\s+[A-Za-z_$][\w$.]*)?\s*\(\s*\{")
+# narrowed keys — `host`/`endpoint` were too generic (round 5 pt 9); `uri` kept for ApolloClient
 _BASEURL_RE = re.compile(
-    r"""\b(?:baseURL|baseUrl|basePath|apiHost|apiBase|apiUrl|uri|endpoint|host)\s*:\s*"""
+    r"""\b(?:baseURL|baseUrl|basePath|apiHost|apiBase|apiUrl|uri)\s*:\s*"""
     r"""("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[A-Za-z_$][\w$.]*)""")
+
+
+def _balanced_brace(text: str, brace_idx: int, cap: int = 2000) -> str:
+    """The balanced ``{…}`` starting at ``brace_idx`` (string-aware, nesting-safe)."""
+    depth, i, n, q = 0, brace_idx, min(len(text), brace_idx + cap), ""
+    while i < n:
+        ch = text[i]
+        if q:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "\"'`":
+            q = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace_idx:i + 1]
+        i += 1
+    return text[brace_idx:n]
 # a method call on a known client:  c.get("/admin/users")  |  c.post(PATH + "/x")
 _CLIENT_CALL_RE = re.compile(
     r"\b([A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|patch|delete|head|options|request)\s*\(\s*"
@@ -140,7 +163,8 @@ def _client_base_map(text: str, consts: dict) -> dict:
     """Map a client identifier to its resolved baseURL (axios.create / ApolloClient / config)."""
     clients: dict = {}
     for m in _CLIENT_DEF_RE.finditer(text):
-        name, objbody = m.group(1), m.group(2)
+        name = m.group(1)
+        objbody = _balanced_brace(text, m.end() - 1)     # m ends at the '{'
         bm = _BASEURL_RE.search(objbody)
         if not bm:
             continue

@@ -23,7 +23,7 @@ FULL_SECRETS = ["AKIAIOSFODNN7EXAMPLE", "sk_live_4eC39HqLyjWDarjtT1zdp7dcABCDEFG
 ARTIFACTS = ["endpoints.json", "sinks.json", "postmessage.json", "secrets.json", "libs.json",
              "graphql.json", "flags.json", "routes.json", "storage.json", "chunks.json",
              "sourcemaps.json", "framework.json", "csp.json", "history.json", "source_notes.json",
-             "leads.json", "issues.json", "endpoints.txt", "report.md"]
+             "responses.json", "leads.json", "issues.json", "endpoints.txt", "report.md"]
 
 
 def main() -> int:

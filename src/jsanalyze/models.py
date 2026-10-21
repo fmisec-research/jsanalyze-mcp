@@ -108,6 +108,7 @@ class Triaged:
     sourcemaps: list[dict] = field(default_factory=list)    # real .map refs + recovered
     csp: list[dict] = field(default_factory=list)           # CSP directive hosts (csp.json)
     notes: list[dict] = field(default_factory=list)         # mined source comments (source_notes.json)
+    responses: dict = field(default_factory=dict)           # response over-fetch + HTML sinks (responses.json)
     issues: list[str] = field(default_factory=list)         # enricher/jsluice failures (surfaced)
 
 

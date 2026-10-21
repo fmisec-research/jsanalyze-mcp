@@ -51,13 +51,20 @@ _ATTACKER_SOURCES = (
 _INJECTABLE = ("hash", "search", "param", "data", "storage", "referrer", "name", "query")
 # a url-class taint that is just the current location copied around = navigation, not XSS
 _SELF_NAV = ("location.href", "location.pathname", "location.origin", "document.location")
+# a url-class sink is XSS only when the scheme can be javascript:/data:text/html — otherwise a
+# tainted navigation target is an OPEN REDIRECT, not DOM-XSS (round 5 pt 13).
+_JS_SCHEME_RE = re.compile(r"javascript:|data:\s*text/html|vbscript:", re.I)
 
 _STRING_RE = re.compile(r"""(['"`])(?:\\.|(?!\1).)*\1""")
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
 # a sanitizer whose OUTPUT lands in this sink — maps the call name to its retire component
 # so a vulnerable VERSION (known bypass) can be bound to the actual call site (round 4 pt 4).
-_SANITIZER_RE = re.compile(r"\b(DOMPurify|sanitizeHtml|sanitize_html|marked|markdownit|markdown_it|xss)\b")
+# must be a CALL (`DOMPurify.sanitize(` / `marked(` / `xss(`) — a bare word `xss` or `marked`
+# in a snippet is not a sanitizer invocation (round 5 pt 8).
+_SANITIZER_RE = re.compile(
+    r"\b(DOMPurify|sanitizeHtml|sanitize_html|marked|markdownit|markdown_it|xss)\b"
+    r"\s*(?:\.\s*[A-Za-z_$][\w$]*\s*)?\(")
 _SAN_COMPONENT = {
     "dompurify": "dompurify", "sanitizehtml": "sanitize-html", "sanitize_html": "sanitize-html",
     "marked": "marked", "markdownit": "markdown-it", "markdown_it": "markdown-it", "xss": "xss",
@@ -127,6 +134,13 @@ _FN_DECL_RE = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(")
 _FN_ARROW_RE = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*")
 _CALL_NAME_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 _RETURN_RE = re.compile(r"\breturn\b([^;\n}]{1,200})")
+# a brace-bodied function HEADER in any of the shapes minifiers emit (round 5 pt 15):
+# function NAME(p){ | const NAME = (p)=>{ | NAME = function(p){ | NAME: (p)=>{ | const NAME = p =>{
+_FN_HEADER_RE = re.compile(
+    r"function\s+(?P<n1>[A-Za-z_$][\w$]*)\s*\((?P<p1>[^)]*)\)\s*\{"
+    r"|\b(?:const|let|var)\s+(?P<n2>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\s*\*?\s*)?\((?P<p2>[^)]*)\)\s*(?:=>\s*)?\{"
+    r"|\b(?:const|let|var)\s+(?P<n4>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?P<p4>[A-Za-z_$][\w$]*)\s*=>\s*\{"
+    r"|(?P<n3>[A-Za-z_$][\w$.]*)\s*[:=]\s*(?:async\s+)?(?:function\s*\*?\s*)?\((?P<p3>[^)]*)\)\s*(?:=>\s*)?\{")
 
 
 def _balanced(text: str, open_idx: int) -> int:
@@ -156,19 +170,19 @@ def _balanced(text: str, open_idx: int) -> int:
 
 
 def _enclosing_fn(text: str, pos: int) -> "tuple[str, list] | None":
-    """The nearest NAMED function whose balanced body contains ``pos`` -> (name, [params])."""
+    """The nearest named/assigned/arrow function whose balanced body contains ``pos`` ->
+    (name, [params]). Handles `function f(){}`, `const f=(e)=>{}`, `x.f=function(e){}` (pt 15)."""
     best = None
-    for m in _FN_DECL_RE.finditer(text):
+    for m in _FN_HEADER_RE.finditer(text):
         if m.start() > pos:
             break
-        br = text.find("{", m.end())
-        if br == -1 or br - m.end() > 60:
-            continue
+        br = m.end() - 1                       # the '{' the header ends on
         end = _balanced(text, br)
         if end != -1 and br < pos <= end:
-            pm = re.search(r"\(([^)]*)\)", text[m.start():br])
-            params = [p.strip() for p in (pm.group(1).split(",") if pm else []) if p.strip()]
-            best = (m.group(1), params)       # keep the innermost enclosing (latest start)
+            name = m.group("n1") or m.group("n2") or m.group("n3") or m.group("n4")
+            praw = m.group("p1") or m.group("p2") or m.group("p3") or m.group("p4") or ""
+            params = [p.strip().split("=")[0].strip() for p in praw.split(",") if p.strip()]
+            best = ((name or "").split(".")[-1], params)   # innermost enclosing (latest start)
     return best
 
 
@@ -259,6 +273,10 @@ def _fn_index(items) -> "tuple[dict, set]":
             tail = text[m.end():m.end() + 200]
             if tail[:1] != "{":                          # expression-body arrow: tail IS the return
                 returns.setdefault(name, tail.split(";")[0].split("\n")[0].strip())
+        for m in _FN_HEADER_RE.finditer(text):           # assigned/method/arrow names too (pt 15)
+            nm = m.group("n1") or m.group("n2") or m.group("n3") or m.group("n4")
+            if nm:
+                defined.add(nm.split(".")[-1])
     return returns, defined
 
 
@@ -400,6 +418,8 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                 "lead": lead, "untraced": untraced and not real,
                 "caller_chain": chain, "crossfile_break": crossfile_break,
                 "sanitizer": _san_component(source),
+                # a tainted url-class sink with no javascript:/data: scheme is an open redirect
+                "redirect": sink_class == "url" and real and not _JS_SCHEME_RE.search(source),
                 "detector": "jsluice:sinks" if not rec.get("discovered") else f"taint:{rec.get('framework', 'dom')}",
                 "severity_hint": sev if real else "info",
                 "confidence": conf if real else "low",

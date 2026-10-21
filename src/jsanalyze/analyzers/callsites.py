@@ -146,14 +146,33 @@ def _push(keys: list, token, cap: int) -> None:
         keys.append(token)
 
 
-def _body_keys_from_arg(arg: str) -> list:
-    """Keys of a body/data value: a JSON.stringify({...}) wrapper or a bare object."""
+_BARE_IDENT_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
+
+
+def _body_keys_from_arg(arg: str, text: str = "") -> list:
+    """Keys of a body/data value: a JSON.stringify({...}) wrapper, a bare object, or —
+    when the value is a bare identifier — the object literal that variable is assigned in
+    the same file (`const payload = { role, name }`; round 5 pt 16)."""
     sm = _STRINGIFY_RE.search(arg)
     if sm:
         inner, end = _balanced(arg, sm.end() - 1, "(", ")")
         if end != -1:
-            return object_keys(inner)
-    return object_keys(arg)
+            keys = object_keys(inner)
+            if keys:
+                return keys
+            arg = inner                          # JSON.stringify(payload) -> resolve payload
+    keys = object_keys(arg)
+    if keys:
+        return keys
+    if text:
+        v = arg.strip().rstrip(",);").strip()
+        if _BARE_IDENT_RE.match(v):
+            dm = re.search(r"\b(?:const|let|var)?\s*" + re.escape(v) + r"\s*=\s*\{", text)
+            if dm:
+                inner, end = _balanced(text, dm.end() - 1, "{", "}")
+                if end != -1:
+                    return object_keys("{" + inner + "}")
+    return keys
 
 
 def request_shape(text: str, line: int, radius: int = 2) -> dict:
@@ -191,7 +210,7 @@ def request_shape(text: str, line: int, radius: int = 2) -> dict:
         if _BODY_KEY_RE.search(a):
             # isolate the value after body:/data:
             bm = _BODY_KEY_RE.search(a)
-            body_keys = _body_keys_from_arg(a[bm.end():])
+            body_keys = _body_keys_from_arg(a[bm.end():], text)
             if body_keys:
                 break
     # axios-style verb(url, {..}) with no body: wrapper -> 2nd arg object is the body

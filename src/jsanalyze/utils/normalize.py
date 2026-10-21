@@ -31,7 +31,9 @@ _DIGITS_RE = re.compile(r"^\d+$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _LONGHEX_RE = re.compile(r"^[0-9a-f]{16,}$", re.I)
 _B64ISH_RE = re.compile(r"^[A-Za-z0-9_\-]{20,}={0,2}$")       # token-ish opaque id
-_MIXED_ID_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9_\-]{8,}$")    # e.g. ab12cd34 — has a digit
+# an opaque id needs ≥2 digits — so a version/namespace label like `version2` is NOT an
+# id segment and won't collapse to {id} (which would mint a false IDOR; round 5 pt 11).
+_MIXED_ID_RE = re.compile(r"^(?=(?:\D*\d){2,})[A-Za-z0-9_\-]{8,}$")
 _EXPR_RE = re.compile(r"^EXPR$|EXPR", re.I)
 
 _ASSET_EXT = (

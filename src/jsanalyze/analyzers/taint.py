@@ -190,7 +190,8 @@ def _definition_rhs(text: str, name: str,
     """RHS (and start offset) of the ``[var|let|const] name = <rhs>`` assignment nearest
     *before* ``before``; the first in the file when ``before`` is None. Returns
     ``(None, None)`` if the only definitions sit at/after the sink."""
-    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=\s*([^;\n,]{1,300})")
+    # a single '=' ONLY — never ==/===/!=/<=/>= (a comparison is not an assignment; round 5 pt 1)
+    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=(?![=])\s*([^;\n,]{1,300})")
     chosen = None
     for m in rx.finditer(text):
         rhs = m.group(1).strip()

@@ -44,6 +44,7 @@ from jsanalyze.models import Triaged
 from jsanalyze.parsers.csp import collect_csp
 from jsanalyze.parsers.history import collect_history
 from jsanalyze.parsers.inputs import load_input
+from jsanalyze.parsers.responses import collect_responses
 from jsanalyze.utils import workspace as W
 
 SCOPE = ["target.tld"]
@@ -82,6 +83,10 @@ const api3 = axios.create({ baseURL: "/api/v3" });
 api3.get("/admin/metrics");
 const sb = createClient("https://proj.supabase.co", "anonKeyFAKE000");
 function ownerSink(v){ ownerEl.innerHTML = "<div class=owner>" + v; }
+
+// round 5: a tainted NAVIGATION target (open redirect, not XSS) and a client-set price
+document.location.href = location.search;
+fetch("/cart/checkout", {method:"POST", body: JSON.stringify({price: chosenPrice, item: sku})});
 """
 
 RUNTIME_JS = r"""
@@ -143,6 +148,12 @@ def _build_xml(path: Path) -> None:
         # field the bundle can also send (body-delta -> body-field-unsent on `role`).
         _item("https://target.tld/api/v1/users/42", "target.tld", "PATCH", "JSON", "", '{"ok":1}',
               "application/json", req_body='{"locale":"en"}'),
+        # a JSON RESPONSE that over-fetches sensitive fields (round 5 pt 17)
+        _item("https://target.tld/api/v1/me", "target.tld", "GET", "JSON", "",
+              '{"id":5,"email":"a@b.c","role":"admin","token":"SESSIONxyz"}', "application/json"),
+        # the operator POSTed a client-chosen price (round 5 pt 18)
+        _item("https://target.tld/cart/checkout", "target.tld", "POST", "JSON", "", '{"ok":1}',
+              "application/json", req_body='{"price":9.99,"item":"sku1"}'),
     ]
     xml = '<?xml version="1.0"?>\n<items burpVersion="2024">\n' + "\n".join(items) + "\n</items>\n"
     path.write_text(xml, encoding="utf-8")
@@ -179,6 +190,7 @@ def _run(xml: Path, run):
         chunks=map_chunks(js_items, cfg=cfg),
         framework=detect_framework(js_items, cfg=cfg),
         csp=csp.get("directives", []),
+        responses=collect_responses(xml, SCOPE),
     )
     leads = build_leads(tri, cfg=cfg, history=history, scope_hosts=SCOPE)
     return tri, leads, history, csp
@@ -360,6 +372,26 @@ def _assert_all(tri, leads, history, csp) -> list:
     assert any("Replay as the operator" in (l.get("experiment") or "") for l in bf2), \
         f"auth replay recipe not attached to lead experiment: {[l.get('experiment') for l in bf2]}"
     done.append("auth replay: Authorization + Cookie names carried onto the lead experiment")
+
+    # 20) url-class taint is OPEN REDIRECT, not DOM-XSS (round 5 pt 13)
+    orr = by_cls.get("open-redirect", [])
+    assert orr, f"tainted navigation (location.href=location.search) not an open-redirect: {list(by_cls)}"
+    assert not any(l.get("class") == "xss-sink" and "location" in (l.get("title") or "").lower()
+                   and "href" in (l.get("title") or "").lower() for l in leads), \
+        "a navigation sink was mislabeled DOM-XSS"
+    done.append("url-sink: location.href = location.search -> open-redirect (hunt-open-redirect), not XSS")
+
+    # 21) response over-fetch (round 5 pt 17): JSON response with token/role/email -> response-exposure
+    re_leads = by_cls.get("response-exposure", [])
+    assert any("token" in str(l.get("evidence") or "") or "role" in str(l.get("evidence") or "")
+               for l in re_leads), f"sensitive response fields not surfaced: {re_leads}"
+    done.append("response over-fetch: /api/v1/me returns token/role/email -> response-exposure (hunt-api)")
+
+    # 22) client-set money field (round 5 pt 18): price in the sent body -> business-logic
+    ccv = by_cls.get("client-controlled-value", [])
+    assert any("price" in (l.get("body_keys") or []) for l in ccv), \
+        f"client-sent price not a business-logic lead: {ccv}"
+    done.append("client price: POST /cart/checkout {price} sent -> client-controlled-value (hunt-business-logic)")
 
     # scoring sanity: the top lead is not a postMessage listener
     top = sorted(leads, key=lambda l: -float(l.get("score") or 0))[0]

@@ -21,14 +21,27 @@ import re
 
 from jsanalyze.party import party_of
 
-# a weak origin check (defeatable) — a lead (postmessage-origin-bypass), not a control
+# a WEAK origin check (defeatable) — must operate ON the event origin (round 5 pt 6): a
+# substring/prefix test on `.origin`, a compare to empty, or indexOf(origin)===0.
 _WEAK_ORIGIN = re.compile(
-    r"\.origin\s*\.\s*(indexOf|startsWith|endsWith|includes|match|search)\b"
-    r"|\borigin\s*(===?|!==?)\s*(['\"]\s*['\"]|``)"            # compare to empty string
-    r"|(indexOf|includes|startsWith|endsWith)\s*\(\s*['\"][^'\"]*['\"]\s*\)",
+    r"\borigin\s*\.\s*(?:indexOf|startsWith|endsWith|includes|match|search)\b"
+    r"|\borigin\s*(?:===?|!==?)\s*(?:['\"]\s*['\"]|``)"                       # origin == ""
+    r"|indexOf\s*\(\s*[^)]*\borigin\b[^)]*\)\s*===?\s*0",                     # indexOf(e.origin) === 0
     re.IGNORECASE,
 )
-_TOKENISH = re.compile(r"token|auth|jwt|oauth|\bcode\b|secret|credential|session|bearer", re.IGNORECASE)
+# a STRONG, recognised control — only THIS demotes a listener (round 5 pt 14: jsluice sets
+# originChecked just because the word 'origin' appears, which is not proof of a real check).
+_STRONG_ORIGIN = re.compile(
+    r"\borigin\s*(?:===?|!==?)\s*['\"][^'\"]{3,}['\"]"                        # origin === "https://trusted"
+    r"|['\"][^'\"]{3,}['\"]\s*(?:===?|!==?)\s*[A-Za-z_$][\w$.]*\.origin"      # "https://x" === e.origin
+    r"|\.(?:includes|has)\s*\(\s*[^)]*\borigin\b[^)]*\)"                      # allowlist.includes(e.origin)
+    r"|indexOf\s*\(\s*[^)]*\borigin\b[^)]*\)\s*(?:!==?\s*-\s*1|>=?\s*0|>\s*-\s*1)",  # indexOf(e.origin)!==-1
+    re.IGNORECASE,
+)
+# token/credential-ish — WHOLE words only, so `author`/`sessionStorage` don't trigger (pt 5)
+_TOKENISH = re.compile(
+    r"\b(?:token|jwt|bearer|secret|credential|oauth|auth|session|apikey|api[_-]?key"
+    r"|access[_-]?token|id[_-]?token|refresh[_-]?token)\b|[A-Za-z]+Token\b", re.IGNORECASE)
 _WILDCARD_TARGET = re.compile(r"postMessage\s*\([^;]*?,\s*(['\"])\*\1\s*\)", re.IGNORECASE)
 
 # a sink the handler's event.data can reach (critique point 7) — if the handler body
@@ -144,6 +157,24 @@ def _skip_str(text: str, i: int, n: int) -> int:
     return i
 
 
+def _origin_strength(text: str, line, source: str) -> str:
+    """'strong' | 'weak' | 'none' — judged on the handler BODY when available (fuller than
+    jsluice's snippet), else the snippet. 'none' means we looked and saw no real check."""
+    scope = source or ""
+    if text and line:
+        off = _offset_of(text, int(line))
+        pm = _HANDLER_PARAM_RE.search(text[off: off + 400])
+        if pm:
+            body = _handler_body(text, off + pm.end())
+            if body:
+                scope = body
+    if _STRONG_ORIGIN.search(scope):
+        return "strong"
+    if _WEAK_ORIGIN.search(scope):
+        return "weak"
+    return "none"
+
+
 def _offset_of(text: str, line: int) -> int:
     i, cur = 0, 1
     while cur < line:
@@ -198,25 +229,29 @@ def classify_postmessage(pm_records, items, cfg=None, scope_hosts=None) -> list[
             )
 
         elif kind == "addEventListener":
-            # critique point 7: a no-origin-check listener is STILL a lead (missing
-            # check is the precondition and jsluice's sink list is incomplete), but it
-            # is DEMOTED to low when nothing shows the data reaching a sink — so it no
-            # longer sits at the top of the queue above real endpoints.
-            if not origin_checked:
-                sev = "high" if reaches else ("medium" if data_flow else "low")
-                base.update(
-                    pm_class="postmessage-listener", lead=True, suggested_skill="hunt-xss",
-                    severity_hint=sev, confidence="medium" if signal else "low",
-                )
-            elif _WEAK_ORIGIN.search(source):
-                sev = "high" if reaches else ("medium" if data_flow else "low")
+            # Only a RECOGNISED strong check demotes a listener; jsluice's originChecked by
+            # itself is not trusted (round 5 pt 14). A weak check -> origin-bypass lead; no
+            # check (or an unverifiable one) -> listener lead, demoted to low without a sink.
+            strength = _origin_strength(text_by_base.get(src_file, ""), rec.get("line"), source)
+            sev = "high" if reaches else ("medium" if data_flow else "low")
+            if strength == "strong":
+                base.update(pm_class="postmessage-listener-checked", lead=False,
+                            suggested_skill="hunt-xss", severity_hint="info", confidence="low")
+            elif strength == "weak":
                 base.update(
                     pm_class="postmessage-origin-bypass", lead=True, suggested_skill="hunt-xss",
                     severity_hint=sev, confidence="medium" if signal else "low",
                 )
             else:
-                base.update(pm_class="postmessage-listener-checked", lead=False,
-                            suggested_skill="hunt-xss", severity_hint="info", confidence="low")
+                # no verifiable check — even if jsluice flagged originChecked, keep it a lead
+                note = ("origin referenced but no verifiable exact/allow-list check found — "
+                        "confirm by hand") if origin_checked else ""
+                base.update(
+                    pm_class="postmessage-listener", lead=True, suggested_skill="hunt-xss",
+                    severity_hint=sev, confidence="medium" if signal else "low",
+                )
+                if note:
+                    base["note"] = note
         else:
             base.update(pm_class=kind or "unknown", lead=False, suggested_skill="hunt-xss",
                         severity_hint="info", confidence="low")

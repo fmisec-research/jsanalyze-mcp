@@ -84,7 +84,9 @@ _VERSION_RES: dict[str, list[re.Pattern]] = {
 # --- framework-specific XSS / pollution gadgets (critique point 11) -----------
 # Each: how to find it, the lead class, skill, severity and the proof instruction.
 _ANGULAR_BYPASS_RE = re.compile(r"bypassSecurityTrust(?:Html|Script|Style|Url|ResourceUrl)\s*\(")
-_PROTO_LODASH_RE = re.compile(r"(?<![\w$])(?:_|lodash)\s*\.\s*(merge|mergeWith|defaultsDeep|setWith|set)\s*\(")
+# merge/mergeWith/defaultsDeep are the classic prototype-pollution sinks; `.set`/`.setWith`
+# need an attacker-controlled PATH and are too noisy as a bare match (round 5 pt 10) — dropped.
+_PROTO_LODASH_RE = re.compile(r"(?<![\w$])(?:_|lodash)\s*\.\s*(merge|mergeWith|defaultsDeep)\s*\(")
 _PROTO_JQ_RE = re.compile(r"\$\s*\.\s*extend\s*\(\s*(?:!0|true)\b")
 _NEXT_DATA_RE = re.compile(r"__NEXT_DATA__")
 _JSURI_RE = re.compile(
@@ -92,7 +94,11 @@ _JSURI_RE = re.compile(
 _JSURI_DYNAMIC = re.compile(r"""javascript:['"`]?\s*(?:\+|\$\{)|(?:\+|\$\{)[^;\n]{0,20}javascript:""")
 # round 2 (new): OAuth literals and Firebase web-config object
 _OAUTH_IMPLICIT_RE = re.compile(r"response_type\s*[=:]\s*['\"]?\s*(token|id_token)\b", re.I)
-_OAUTH_REDIRECT_RE = re.compile(r"\bredirect_uri\b", re.I)
+# only when redirect_uri is BUILT from a dynamic value (concat / location / template / encode)
+# — a bare mention or a static literal is not worth a lead (round 5 pt 7).
+_OAUTH_REDIRECT_RE = re.compile(
+    r"\bredirect_uri\b\s*[=:]\s*(?:encodeURIComponent\s*\(|window\s*\.\s*location|location\s*\."
+    r"|[A-Za-z_$][\w$.]*\s*\+|['\"][^'\"]*['\"]\s*\+|`[^`]*\$\{)", re.I)
 _AIZA_RE = re.compile(r"AIza[0-9A-Za-z\-_]{20,}")
 # a cloud SDK client: createClient("https://xyz.supabase.co", anonKey) (Supabase & kin)
 _CREATE_CLIENT_RE = re.compile(

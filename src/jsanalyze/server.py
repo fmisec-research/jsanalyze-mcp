@@ -51,6 +51,7 @@ from jsanalyze.leads.lead_engine import build_leads
 from jsanalyze.models import Item, Triaged
 from jsanalyze.parsers.csp import collect_csp
 from jsanalyze.parsers.history import collect_history
+from jsanalyze.parsers.responses import collect_responses
 from jsanalyze.parsers.inputs import load_input
 from jsanalyze.utils import workspace as W
 
@@ -160,6 +161,8 @@ def analyze(
                     {"known": False, "keys": set(), "entries": [], "count": 0})
     csp = _safe("csp", lambda: collect_csp(p, scope_hosts), issues,
                 {"known": False, "policies": [], "directives": []})
+    responses = _safe("responses", lambda: collect_responses(p, scope_hosts), issues,
+                      {"overfetch": [], "html_sinks": []})
     routes = _safe("routes", lambda: extract_routes(all_items, cfg=cfg), issues, [])
     route_paths = [r.get("path") for r in routes if r.get("path")]
 
@@ -182,6 +185,7 @@ def analyze(
         sourcemaps=sm.get("refs", []),
         csp=csp.get("directives", []),
         notes=_safe("source_notes", lambda: mine_comments(src_items), issues, []),
+        responses=responses,
         issues=issues,
     )
 
@@ -197,6 +201,7 @@ def analyze(
         "known": history.get("known", False), "count": history.get("count", 0),
         "hosts": history.get("hosts", []), "entries": history.get("entries", []),
     })
+    W.write_json(run.dir / "responses.json", tri.responses)
     fetchable = sorted({n["path"] if not n.get("host") else n["url"]
                         for n in tri.endpoints if n.get("fetchable")})
     W.write_text(run.dir / "endpoints.txt", "\n".join(fetchable) + ("\n" if fetchable else ""))
