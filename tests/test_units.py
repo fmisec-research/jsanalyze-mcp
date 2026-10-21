@@ -15,14 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jsanalyze.analyzers.callsites import object_keys, request_shape
 from jsanalyze.analyzers.chunks import map_chunks
-from jsanalyze.analyzers.endpoints import _b64decode, _url_like
-from jsanalyze.analyzers.framework import _firebase_configs
-from jsanalyze.analyzers.strings import _build_consts, fold_expr
+from jsanalyze.analyzers.endpoints import _b64decode, _url_like, classify_endpoint
+from jsanalyze.analyzers.framework import _firebase_configs, _scan_gadgets
+from jsanalyze.analyzers.strings import _build_consts, _client_base_map, _join, fold_expr
 from jsanalyze.analyzers.taint import backtrace, discover_html_sinks, sink_arg_idents, source_label
-from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads
+from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads, _vuln_sink_leads
 from jsanalyze.leads.scoring import ScoreInputs, score_lead
 from jsanalyze.models import Lead, Triaged
 from jsanalyze.parsers.history import _json_keys_and_gql, _parse_request_fields
+from jsanalyze.utils.normalize import normalize_path as _np
 from jsanalyze.utils.normalize import (
     API_CALL, ASSET_PREFIX, SPA_ROUTE, classify_string_kind, endpoint_key, history_key,
     normalize_path,
@@ -155,12 +156,15 @@ def test_string_fold():
 
 def test_request_body_parse():
     # round 3 pt 1: the <request> blob the operator sent — parse query + body keys + gql op
-    req = (b"POST /api/v1/users?expand=1 HTTP/1.1\r\nContent-Type: application/json\r\n\r\n"
-           b'{"role":"admin","locale":"en"}')
-    q, b, g = _parse_request_fields(req)
+    req = (b"POST /api/v1/users?expand=1 HTTP/1.1\r\nContent-Type: application/json\r\n"
+           b"Authorization: Bearer x\r\nCookie: sid=abc; theme=dark\r\n\r\n"
+           b'{"role":"admin","locale":"en","user":{"owner":"a"}}')
+    q, b, g, auth = _parse_request_fields(req)
     check("sent query key parsed", q == {"expand"})
-    check("sent body keys parsed", b == {"role", "locale"})
+    check("sent body keys parsed (+nested)", {"role", "locale", "user", "owner"} <= b)
     check("no gql on plain json", g == set())
+    check("auth header name captured", "Authorization" in auth["headers"])
+    check("session cookie name captured", "sid" in auth["cookies"])
     gb, gg = _json_keys_and_gql({"query": "mutation DeleteUser($id:ID!){x}",
                                  "operationName": "DeleteUser", "variables": {"id": "1"}})
     check("gql op extracted", gg == {"DeleteUser"})
@@ -202,6 +206,50 @@ def test_untraced_cap():
     check("empty-chain untraced excluded", all(l.line != 99 for l in unt))
 
 
+def test_baseurl_join_and_guard():
+    # round 4 pt 1: axios.create({baseURL}) + client.get("/x") -> one joined path
+    cm = _client_base_map('const c = axios.create({ baseURL: "/api/v2" });', {})
+    check("client baseURL mapped", cm.get("c") == "/api/v2")
+    check("join base+path", _join("/api/v2", "/admin/users") == "/api/v2/admin/users")
+    # a half-folded EXPR path must NOT become IDOR; a genuine one still does
+    part = {"path": "/api/EXPR/users", "url": "/api/EXPR/users", "norm_path": _np("/api/EXPR/users"),
+            "string_kind": "api", "query": [], "body_keys": [], "fold_partial": True}
+    check("partial-fold EXPR not idor", classify_endpoint(part) is None)
+    genuine = dict(part); genuine["fold_partial"] = False
+    check("genuine EXPR still idor", (classify_endpoint(genuine) or [None])[0] == "idor-candidate")
+
+
+def test_supabase_gadget():
+    g = _scan_gadgets('const sb = createClient("https://xyz.supabase.co", "anonKeyFAKE");', "first", "a.js")
+    sup = [x for x in g if x.get("gadget") == "supabase-config"]
+    check("supabase createClient -> cloud-config", bool(sup) and sup[0]["suggested_skill"] == "hunt-cloud")
+
+
+def test_vuln_call_binding():
+    # round 4 pt 4: vulnerable DOMPurify + its output in an innerHTML sink -> vulnerable-call
+    tri = Triaged(
+        libs=[{"component": "dompurify", "version": "3.2.6", "cves": ["CVE-2024-X"], "cwe": ["79"]}],
+        sinks=[{"kind": "innerHTML", "sink_class": "html", "sanitizer": "dompurify",
+                "caller_chain": [], "occurrences": [{"file": "a.js", "line": 9,
+                "source": "el.innerHTML = DOMPurify.sanitize(x)"}]}],
+    )
+    leads = [ld for ld, _ in _vuln_sink_leads(tri)]
+    check("vulnerable-call lead emitted", any(l.cls == "vulnerable-call" for l in leads))
+    check("vulnerable-call is high/hunt-xss",
+          leads and leads[0].severity_hint == "high" and leads[0].suggested_skill == "hunt-xss")
+
+
+def test_batch_and_multipart():
+    # round 4 pt 3: Apollo batch array -> every op; multipart name="…" -> body keys
+    _bk, gql = _json_keys_and_gql([{"query": "query A{x}", "operationName": "A"},
+                                   {"query": "mutation B{y}", "operationName": "B"}])
+    check("apollo batch yields all ops", gql == {"A", "B"})
+    mp = (b"POST /u HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=X\r\n\r\n"
+          b'--X\r\nContent-Disposition: form-data; name="role"\r\n\r\nadmin\r\n--X--')
+    _q, b, _g, _a = _parse_request_fields(mp)
+    check("multipart name parsed as body key", "role" in b)
+
+
 def test_scoring():
     base = dict(id="", cls="idor-candidate", title="", suggested_skill="hunt-idor",
                 severity_hint="medium", confidence="medium")
@@ -227,7 +275,9 @@ def main() -> int:
     for fn in (test_normalize, test_callsites, test_taint, test_taint_minified,
                test_source_tightened, test_new_sinks, test_atob, test_chunk_runtime_missing,
                test_firebase_config, test_string_fold, test_request_body_parse,
-               test_body_delta, test_untraced_cap, test_scoring):
+               test_body_delta, test_untraced_cap, test_baseurl_join_and_guard,
+               test_supabase_gadget, test_vuln_call_binding, test_batch_and_multipart,
+               test_scoring):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

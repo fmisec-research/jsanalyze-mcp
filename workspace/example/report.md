@@ -1,4 +1,4 @@
-# JS Analysis — target.tld, api.target.tld (2026-10-19_example)
+# JS Analysis — target.tld, api.target.tld (2026-10-21_example)
 
 ## Ringkasan
 - JS: 4 | Endpoints: 10 fetchable/11 | Sinks: 1 lead/2 | Secrets: 5 | Vuln libs: 1 | postMessage: 1 lead/1 | Flags: 0 | Routes: 0 | Storage: 0 | GraphQL: 0 | CSP hosts: 0 | Missing chunks: 1 | Source notes: 0 | Leads: 17

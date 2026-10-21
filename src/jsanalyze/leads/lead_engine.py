@@ -56,6 +56,10 @@ _AUTHZ_MONEY_KEYS = frozenset({
     "plan", "tier", "subscription", "price", "amount", "cost", "total", "balance",
     "credit", "discount", "coupon", "qty", "quantity", "status", "state", "verified",
     "approved", "enabled", "active",
+    # round 4: account-takeover / tenant-pivot fields that frequently pay
+    "email", "password", "redirect", "redirect_uri", "redirect_url", "return_to",
+    "returnurl", "return_url", "callback", "callback_url", "next", "group_id", "groupid",
+    "company_id", "companyid", "workspace_id", "workspaceid", "team_id", "teamid",
 })
 
 
@@ -95,6 +99,24 @@ def _first_occ(cluster):
     return occ.get("file", ""), occ.get("line"), occ.get("source", "")
 
 
+def _auth_hint(history) -> str:
+    """The replay recipe (round 4, point 5): the auth header / cookie NAMES the operator's
+    own requests carried (values stay in auth/, never here). Lets a lead's experiment say
+    exactly how to replay instead of a generic sentence."""
+    if not isinstance(history, dict):
+        return ""
+    hdrs = sorted(history.get("auth_headers") or ())
+    cks = sorted(history.get("auth_cookies") or ())
+    if not hdrs and not cks:
+        return ""
+    bits = []
+    if hdrs:
+        bits.append("header(s) " + ", ".join(hdrs[:4]))
+    if cks:
+        bits.append("cookie(s) " + ", ".join(cks[:4]))
+    return "Replay as the operator — send " + " and ".join(bits) + " (values are in auth/, masked here)."
+
+
 def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]:
     cfg = cfg or load_config()
     mask = cfg.get("mask_secrets_in_leads", True)
@@ -102,6 +124,7 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     # fetched". endpoint-unverified and the +not_in_history boost ride on this, so a
     # JS-only capture no longer paints every bundle path as untested surface (round 2 pt 1).
     api_known = bool((history or {}).get("api_known")) if isinstance(history, dict) else False
+    auth_hint = _auth_hint(history)
 
     secret_files = {s.get("source_file") for s in (getattr(triaged, "secrets", []) or [])
                     if s.get("source_file")}
@@ -113,8 +136,8 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     pairs: list[tuple[Lead, ScoreInputs]] = []
     pairs += _sink_leads(triaged, secret_files)
     pairs += _pm_leads(triaged, secret_files)
-    pairs += _endpoint_leads(triaged, secret_files, api_known)
-    pairs += _body_delta_leads(triaged, history)
+    pairs += _endpoint_leads(triaged, secret_files, api_known, auth_hint)
+    pairs += _body_delta_leads(triaged, history, auth_hint)
     pairs += _hidden_route_leads(triaged, api_paths, api_known)
     pairs += _storage_leads(triaged, secret_files)
     pairs += _graphql_leads(triaged)
@@ -123,6 +146,7 @@ def build_leads(triaged, cfg=None, history=None, scope_hosts=None) -> list[dict]
     pairs += _note_leads(triaged)
     pairs += _gadget_leads(triaged, secret_files)
     pairs += _secret_leads(triaged, mask, secret_files)
+    pairs += _vuln_sink_leads(triaged)
     pairs += _lib_leads(triaged)
     pairs += _flag_leads(triaged)
 
@@ -250,7 +274,7 @@ def _pm_leads(triaged, secret_files):
 
 
 # --- endpoints (classified) + the history delta -------------------------------
-def _endpoint_leads(triaged, secret_files, api_known):
+def _endpoint_leads(triaged, secret_files, api_known, auth_hint=""):
     out = []
     seen_ep = set()
     for n in getattr(triaged, "endpoints", []) or []:
@@ -264,7 +288,7 @@ def _endpoint_leads(triaged, secret_files, api_known):
             if key in seen_ep:
                 continue
             seen_ep.add(key)
-            ld = _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist)
+            ld = _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist, auth_hint)
             out.append((ld, ScoreInputs(
                 party=n.get("party", "first"), in_scope=n.get("in_scope"),
                 call_type=n.get("call_type", ""), has_id_segment=has_id,
@@ -282,7 +306,7 @@ def _endpoint_leads(triaged, secret_files, api_known):
             seen_ep.add(key)
             ld = _mk_endpoint_lead(
                 n, "endpoint-unverified", "hunt-api", "low", "low",
-                "in the bundle but absent from captured traffic", src_file, in_hist)
+                "in the bundle but absent from captured traffic", src_file, in_hist, auth_hint)
             out.append((ld, ScoreInputs(
                 party="first", in_scope=n.get("in_scope"), call_type=n.get("call_type", ""),
                 has_id_segment=has_id, secret_nearby=src_file in secret_files,
@@ -290,7 +314,7 @@ def _endpoint_leads(triaged, secret_files, api_known):
     return out
 
 
-def _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist):
+def _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist, auth_hint=""):
     ev = f"{n.get('method') or ''} {n.get('path')}".strip()
     note = f"{why}; party={n.get('party')}; in_scope={n.get('in_scope')}; kind={n.get('string_kind')}"
     if n.get("dynamic"):
@@ -304,6 +328,8 @@ def _mk_endpoint_lead(n, cls, skill, conf, sev, why, src_file, in_hist):
            if cls in ("bfla-candidate", "endpoint-hidden") else
            "The control (current/authorized path or role) must behave differently.")
     exp = _endpoint_experiment(cls, n, body)
+    if auth_hint:
+        exp += " " + auth_hint
     return Lead(
         id="", cls=cls, suggested_skill=skill, title=f"{cls} — {ev}",
         source_file=src_file, line=n.get("line"), evidence=ev,
@@ -339,7 +365,7 @@ def _has_id_shape(n) -> bool:
 
 
 # --- body/query/GraphQL-op delta vs the request the operator ACTUALLY sent ----
-def _body_delta_leads(triaged, history):
+def _body_delta_leads(triaged, history, auth_hint=""):
     """Fields the BUNDLE can send that were NEVER in the captured traffic (round 3 pt 1).
 
     This is the one signal a crawler/other JS tool cannot reproduce: it joins the call-site
@@ -386,10 +412,14 @@ def _body_delta_leads(triaged, history):
                       "price/quantity tamper, tenant/owner swap) and compare vs the control. (hunt-api)",
             negative_control="The server must ignore/reject the injected field; a changed object, "
                              "role, price or tenant in the response is the bug.",
-            experiment=f"Replay `{ev}` adding {fields} (start on your OWN object); a persisted change "
-                       f"to a field you should not control proves it.",
+            experiment=(f"Replay `{ev}` adding {fields} (start on your OWN object); a persisted change "
+                        f"to a field you should not control proves it."
+                        + (" " + auth_hint if auth_hint else "")),
             notes=f"party={n.get('party')}; sent_body={sorted(entry['body'])[:8]}; "
-                  f"bundle_body={sorted(jbody)[:8]}.",
+                  f"bundle_body={sorted(jbody)[:8]}"
+                  + (f"; auth: {sorted(entry.get('auth_headers') or ())[:3]}"
+                     f"{'+cookies' if entry.get('cookies') else ''}" if entry.get('auth_headers')
+                     or entry.get('cookies') else "") + ".",
         )
         out.append((ld, ScoreInputs(party=n.get("party", "first"), in_scope=n.get("in_scope"),
                                     has_id_segment=_has_id_shape(n))))
@@ -403,27 +433,32 @@ def _body_delta_leads(triaged, history):
             if g.get("party") == "third":
                 continue
             name = (g.get("operationName") or "").strip()
-            if not name or name.lower() in sent_gql:
-                continue
-            key = ("gql", name)
+            if name and name.lower() in sent_gql:
+                continue                               # this named op WAS sent
+            op = g.get("operation") or "query"
+            # an anonymous operation can't be matched to traffic by name — still surface it
+            # (round 4 pt 3), flagged, rather than dropping it on `if not name`.
+            display = name or f"(anonymous {op})"
+            key = ("gql", display, g.get("file"))
             if key in seen:
                 continue
             seen.add(key)
-            op = g.get("operation") or "query"
+            anon_note = "" if name else " — anonymous op, cannot be matched to traffic by name"
             ld = Lead(
                 id="", cls="graphql-unsent", suggested_skill="hunt-graphql",
-                title=f"GraphQL {op} {name} is in the bundle but was never sent",
+                title=f"GraphQL {op} {display} is in the bundle but was never sent",
                 source_file=g.get("file", ""), line=g.get("line"),
-                evidence=f"{op} {name}", detector="history:gql-delta",
+                evidence=f"{op} {display}", detector="history:gql-delta",
                 confidence="low", severity_hint="medium" if op != "query" else "low",
                 body_keys=[v.lstrip("$") for v in (g.get("variables") or [])], seen_in_history=False,
                 next_step="GraphQL was exercised but THIS operation never was — a POST /graphql in "
                           "traffic does not mean every operation is tested. Send it and test its "
                           "per-resolver authz with two accounts. (hunt-graphql)",
                 negative_control="With account B's token the operation must not read/mutate A's object.",
-                experiment=f"Send `{op} {name}` authenticated as B using A's id in its variables; a "
-                           f"cross-account effect proves BOLA/BFLA on an untested operation.",
-                notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}.",
+                experiment=(f"Send `{op} {display}` authenticated as B using A's id in its variables; a "
+                            f"cross-account effect proves BOLA/BFLA on an untested operation."
+                            + (" " + auth_hint if auth_hint else "")),
+                notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}{anon_note}.",
             )
             out.append((ld, ScoreInputs(party=g.get("party", "first"), in_scope=True,
                                         has_id_segment=any("id" in v.lower() for v in (g.get("variables") or [])))))
@@ -772,6 +807,50 @@ def _secret_leads(triaged, mask, secret_files):
 
 
 # --- vulnerable libraries -----------------------------------------------------
+def _vuln_sink_leads(triaged):
+    """Bind a vulnerable retire component to a REAL call site whose output reaches an HTML
+    sink (round 4 pt 4). A `vulnerable-library` lead says "this version is here"; a
+    `vulnerable-call` lead says "this version's sanitizer output is going into innerHTML" —
+    i.e. a known bypass for this version is DOM-XSS. Without a call it stays a low lib lead."""
+    out = []
+    vuln = {str(lib.get("component", "")).lower(): lib
+            for lib in getattr(triaged, "libs", []) or [] if lib.get("component")}
+    if not vuln:
+        return out
+    seen = set()
+    for c in getattr(triaged, "sinks", []) or []:
+        san = c.get("sanitizer")
+        if not san:
+            continue
+        lib = vuln.get(san) or next((l for k, l in vuln.items() if san in k or k in san), None)
+        if not lib:
+            continue
+        f, line, src = _first_occ(c)
+        key = (san, f, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        cves = ", ".join((lib.get("cves") or [])[:3]) or "a known bypass"
+        ld = Lead(
+            id="", cls="vulnerable-call", suggested_skill="hunt-xss",
+            title=f"Vulnerable {lib.get('component')} {lib.get('version')} output reaches {c.get('kind')}",
+            source_file=f, line=line, evidence=src, detector="retire+sink",
+            confidence="medium", severity_hint="high",
+            caller_chain=c.get("caller_chain") or [],
+            next_step=(f"{lib.get('component')} {lib.get('version')} is vulnerable ({cves}) AND its "
+                       f"output flows into `{c.get('kind')}` here — unlike a version-only finding, the "
+                       f"vulnerable path is REACHED. Apply the known bypass payload for this version "
+                       f"and confirm execution. (hunt-xss)"),
+            negative_control="If the deployed version is actually patched, or the bypass does not "
+                             "execute in a browser, it is not a finding.",
+            experiment=f"At {f}:{line}, feed the public {lib.get('component')}@{lib.get('version')} "
+                       f"sanitizer-bypass payload through the user input and confirm script execution.",
+            notes=f"retire CVE bound to call site; CVEs={cves}.",
+        )
+        out.append((ld, ScoreInputs(party="first", in_scope=True)))
+    return out
+
+
 def _lib_leads(triaged):
     out = []
     for lib in getattr(triaged, "libs", []) or []:

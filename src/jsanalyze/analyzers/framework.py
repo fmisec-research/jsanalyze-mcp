@@ -94,6 +94,10 @@ _JSURI_DYNAMIC = re.compile(r"""javascript:['"`]?\s*(?:\+|\$\{)|(?:\+|\$\{)[^;\n
 _OAUTH_IMPLICIT_RE = re.compile(r"response_type\s*[=:]\s*['\"]?\s*(token|id_token)\b", re.I)
 _OAUTH_REDIRECT_RE = re.compile(r"\bredirect_uri\b", re.I)
 _AIZA_RE = re.compile(r"AIza[0-9A-Za-z\-_]{20,}")
+# a cloud SDK client: createClient("https://xyz.supabase.co", anonKey) (Supabase & kin)
+_CREATE_CLIENT_RE = re.compile(
+    r"""\bcreateClient\s*\(\s*("[^"\n]+"|'[^'\n]+'|`[^`\n]+`)\s*,\s*"""
+    r"""("[^"\n]+"|'[^'\n]+'|[A-Za-z_$][\w$.]*)""")
 
 
 def _firebase_configs(text: str) -> list:
@@ -205,6 +209,29 @@ def _scan_gadgets(text: str, party: str, base: str) -> list:
                                 "the apiKey by itself is never the finding.",
             "experiment": "With the projectId, probe Firestore/RTDB/Storage REST for unauthenticated "
                           "read/write and whether self-signup is enabled (Operator Gate).",
+        })
+    # Supabase / cloud SDK client -> ONE cloud-config lead (like Firebase), not a lone string
+    for m in _CREATE_CLIENT_RE.finditer(text):
+        tok = m.group(1)
+        url = tok[1:-1]
+        if not url.startswith("http"):
+            continue
+        provider = "supabase" if "supabase" in url.lower() else "cloud-sdk"
+        line = text.count("\n", 0, m.start()) + 1
+        out.append({
+            "cls": "cloud-config", "suggested_skill": "hunt-cloud",
+            "gadget": f"{provider}-config", "severity_hint": "medium", "confidence": "medium",
+            "party": party, "file": base, "line": line,
+            "evidence": " ".join(text[m.start():m.start() + 120].split()),
+            "title": f"{provider} client config (createClient) — {url}",
+            "next_step": (f"A {provider} client is created with a URL + anon/public key. The key is "
+                          "public BY DESIGN — the exposure is the Row-Level-Security / access policies "
+                          "and whether anon can read/write tables or buckets. Enumerate those, not the "
+                          "key. (hunt-cloud)"),
+            "negative_control": "Locked-down RLS/policies + anon denied = not exploitable; the anon key "
+                                "alone is not the bug.",
+            "experiment": f"Hit the {provider} REST/storage API at {url} with the anon key and list "
+                          "tables/buckets readable or writable without auth (Operator Gate).",
         })
     return out
 

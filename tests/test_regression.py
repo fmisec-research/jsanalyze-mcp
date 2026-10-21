@@ -76,12 +76,19 @@ var fb = {apiKey:"AIzaSyFAKE0000000000000000000000000000", authDomain:"demo.fire
 fetch("/api/v1/users/42", {method:"PATCH", body: JSON.stringify({role: newRole, locale: "en"})});
 const ADMIN_API = "/api/v2";
 fetch(ADMIN_API + "/admin/settings", {method:"GET"});
+
+// round 4: axios baseURL + client call, a Supabase client, and a cross-file sink helper
+const api3 = axios.create({ baseURL: "/api/v3" });
+api3.get("/admin/metrics");
+const sb = createClient("https://proj.supabase.co", "anonKeyFAKE000");
+function ownerSink(v){ ownerEl.innerHTML = "<div class=owner>" + v; }
 """
 
 RUNTIME_JS = r"""
 (window.webpackJsonp=window.webpackJsonp||[]).push([[4],{}]);
 n.p="https://cdn.target.tld/app/";
 function jsonpScriptSrc(e){return n.p+e+"."+{3:"aaaa1111",4:"bbbb2222",8:"cccc3333"}[e]+".js"}
+ownerSink(location.hash);
 """
 
 INDEX_HTML = """<!doctype html><html><head>
@@ -102,7 +109,9 @@ def _item(url, host, method, mimetype, ext, body, ctype, extra_headers="", req_b
     resp = base64.b64encode(_http(body, ctype, extra_headers)).decode()
     if req_body is not None:
         target = urlsplit(url).path or "/"
-        req = (f"{method} {target} HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{req_body}")
+        # include the operator's session auth so the replay recipe (point 5) is exercised
+        req = (f"{method} {target} HTTP/1.1\r\nContent-Type: application/json\r\n"
+               f"Authorization: Bearer SECRET\r\nCookie: sid=abc123; theme=dark\r\n\r\n{req_body}")
         request_el = f'<request base64="true">{base64.b64encode(req.encode()).decode()}</request>'
     else:
         request_el = f'<request base64="false">{method} / HTTP/1.1</request>'
@@ -327,6 +336,30 @@ def _assert_all(tri, leads, history, csp) -> list:
     folded = [n for n in tri.endpoints if n.get("norm_path") == "/api/v2/admin/settings"]
     assert folded, f"const+concat endpoint not folded into one path: {[n['norm_path'] for n in tri.endpoints]}"
     done.append("string folding: ADMIN_API + '/admin/settings' -> /api/v2/admin/settings (one endpoint)")
+
+    # 16) baseURL join (round 4 pt 1): axios.create({baseURL:'/api/v3'}) + api3.get('/admin/metrics')
+    joined = [n for n in tri.endpoints if n.get("norm_path") == "/api/v3/admin/metrics"]
+    assert joined, f"baseURL not joined to client path: {[n['norm_path'] for n in tri.endpoints]}"
+    done.append("baseURL join: axios.create baseURL + client.get -> /api/v3/admin/metrics")
+
+    # 17) Supabase createClient -> one cloud-config hunt-cloud lead
+    cc = by_cls.get("cloud-config", [])
+    assert any("supabase" in (l.get("title") or "").lower() for l in cc), \
+        f"supabase createClient not a cloud-config lead: {cc}"
+    done.append("Supabase createClient -> cloud-config (hunt-cloud)")
+
+    # 18) cross-file CALLER taint (round 4 pt 2): ownerSink(v){innerHTML=v} (main.js) <- ownerSink(location.hash) (runtime.js)
+    xf = [l for l in by_cls.get("xss-sink", [])
+          if any("caller, cross-file" in c for c in (l.get("caller_chain") or []))]
+    assert xf, f"cross-file caller taint not resolved: {[l.get('caller_chain') for l in by_cls.get('xss-sink', [])]}"
+    done.append("cross-file caller: ownerSink param tainted by location.hash in another chunk")
+
+    # 19) auth replay recipe on a lead (round 4 pt 5): operator's Authorization/Cookie surfaced
+    assert history.get("auth_headers"), "auth headers not parsed from the <request> blob"
+    bf2 = by_cls.get("body-field-unsent", [])
+    assert any("Replay as the operator" in (l.get("experiment") or "") for l in bf2), \
+        f"auth replay recipe not attached to lead experiment: {[l.get('experiment') for l in bf2]}"
+    done.append("auth replay: Authorization + Cookie names carried onto the lead experiment")
 
     # scoring sanity: the top lead is not a postMessage listener
     top = sorted(leads, key=lambda l: -float(l.get("score") or 0))[0]

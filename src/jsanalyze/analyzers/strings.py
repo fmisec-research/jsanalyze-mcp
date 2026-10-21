@@ -19,6 +19,20 @@ import re
 
 __all__ = ["resolve_string_endpoints", "fold_expr"]
 
+# a client bound to a baseURL:  const c = axios.create({ baseURL: "/api/v2" })  |
+# new ApolloClient({ uri: BASE })  |  const cfg = { baseURL: "…" }
+_CLIENT_DEF_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:[A-Za-z_$][\w$.]*\s*\.\s*create|new\s+[A-Za-z_$][\w$.]*)?\s*\(\s*\{([^{}]{0,600})\}")
+_BASEURL_RE = re.compile(
+    r"""\b(?:baseURL|baseUrl|basePath|apiHost|apiBase|apiUrl|uri|endpoint|host)\s*:\s*"""
+    r"""("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[A-Za-z_$][\w$.]*)""")
+# a method call on a known client:  c.get("/admin/users")  |  c.post(PATH + "/x")
+_CLIENT_CALL_RE = re.compile(
+    r"\b([A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|patch|delete|head|options|request)\s*\(\s*"
+    r"""((?:"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[A-Za-z_$][\w$.]*)"""
+    r"""(?:\s*\+\s*(?:"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[A-Za-z_$][\w$.]*)){0,5})""")
+
 # a run of (string | identifier) joined by `+` — 2..7 operands (a URL built by concatenation)
 _CONCAT_RE = re.compile(
     r"""((?:"[^"\n]*"|'[^'\n]*'|[A-Za-z_$][\w$.]*)(?:\s*\+\s*(?:"[^"\n]*"|'[^'\n]*'|[A-Za-z_$][\w$.]*)){1,6})"""
@@ -114,6 +128,29 @@ def _fold_template(tmpl: str, consts: dict) -> "tuple[str, bool]":
     return _TMPL_VAR_RE.sub(sub, tmpl), used
 
 
+def _join(base: str, path: str) -> str:
+    if not path:
+        return base
+    if path.startswith(("http://", "https://", "//")):
+        return path
+    return base.rstrip("/") + ("" if path.startswith("/") else "/") + path
+
+
+def _client_base_map(text: str, consts: dict) -> dict:
+    """Map a client identifier to its resolved baseURL (axios.create / ApolloClient / config)."""
+    clients: dict = {}
+    for m in _CLIENT_DEF_RE.finditer(text):
+        name, objbody = m.group(1), m.group(2)
+        bm = _BASEURL_RE.search(objbody)
+        if not bm:
+            continue
+        tok = bm.group(1)
+        base = tok[1:-1] if tok[:1] in "\"'`" else consts.get(tok)
+        if base:                                         # only a CONCRETE base (no half-fold)
+            clients[name] = base
+    return clients
+
+
 def resolve_string_endpoints(items) -> list:
     out, seen = [], set()
     for it in items or []:
@@ -127,17 +164,24 @@ def resolve_string_endpoints(items) -> list:
             continue
         base = os.path.basename(sp)
         consts = _build_consts(text)
+        clients = _client_base_map(text, consts)
 
-        def add(url, pos):
+        def add(url, pos, *, method="", detector="strings", ctype="concat"):
             if not _looks_endpoint(url):
                 return
-            key = (base, url)
+            key = (base, method, url)
             if key in seen:
                 return
             seen.add(key)
-            out.append({"url": url, "type": "concat", "detector": "strings",
-                        "source_file": base, "filename": sp,
-                        "line": text.count("\n", 0, pos) + 1})
+            rec = {"url": url, "type": ctype, "detector": detector,
+                   "source_file": base, "filename": sp, "line": text.count("\n", 0, pos) + 1}
+            if method:
+                rec["method"] = method
+            if "EXPR" in url:
+                # a half-folded path — the EXPR is a build gap, NOT necessarily an id segment,
+                # so it must not become an IDOR just because folding stopped (round 4 pt 1).
+                rec["fold_partial"] = True
+            out.append(rec)
 
         for m in _CONCAT_RE.finditer(text):
             expr = m.group(1)
@@ -152,4 +196,12 @@ def resolve_string_endpoints(items) -> list:
             folded, used_ident = _fold_template(m.group(1), consts)
             if used_ident:
                 add(folded, m.start())
+        # baseURL join: a client method call `c.get("/x")` -> baseURL + "/x" (round 4 pt 1)
+        for m in _CLIENT_CALL_RE.finditer(text):
+            name, verb, pathexpr = m.group(1), m.group(2), m.group(3)
+            if name not in clients:
+                continue
+            path, _u = fold_expr(pathexpr, consts)
+            add(_join(clients[name], path), m.start(), method=verb.upper(), detector="baseurl",
+                ctype=f"client.{verb}")
     return out

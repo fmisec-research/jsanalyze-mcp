@@ -229,7 +229,7 @@
     "confidence": "medium",
     "severity_hint": "medium",
     "next_step": "Two accounts A/B: request this object with account B using A's identifier (and the reverse), with a negative control. A cross-account read/write is the proof — a single account proves nothing. (hunt-idor)",
-    "notes": "resource id (users/expr); party=first; in_scope=True; kind=api; dynamic(EXPR).",
+    "notes": "resource id (orders/123); party=first; in_scope=True; kind=api; dynamic(EXPR).",
     "score": 8.3,
     "score_factors": [
       "sev:medium=3",

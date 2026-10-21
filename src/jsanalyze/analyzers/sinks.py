@@ -55,6 +55,14 @@ _SELF_NAV = ("location.href", "location.pathname", "location.origin", "document.
 _STRING_RE = re.compile(r"""(['"`])(?:\\.|(?!\1).)*\1""")
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
+# a sanitizer whose OUTPUT lands in this sink — maps the call name to its retire component
+# so a vulnerable VERSION (known bypass) can be bound to the actual call site (round 4 pt 4).
+_SANITIZER_RE = re.compile(r"\b(DOMPurify|sanitizeHtml|sanitize_html|marked|markdownit|markdown_it|xss)\b")
+_SAN_COMPONENT = {
+    "dompurify": "dompurify", "sanitizehtml": "sanitize-html", "sanitize_html": "sanitize-html",
+    "marked": "marked", "markdownit": "markdown-it", "markdown_it": "markdown-it", "xss": "xss",
+}
+
 # builtin/DOM calls that are NOT a "missing helper" if absent from the capture
 _NOISE_CALLS = frozenset({
     "String", "Number", "Boolean", "Array", "Object", "JSON", "parse", "stringify",
@@ -122,17 +130,101 @@ _RETURN_RE = re.compile(r"\breturn\b([^;\n}]{1,200})")
 
 
 def _balanced(text: str, open_idx: int) -> int:
+    """End index of the ``{…}`` opening at ``open_idx`` — STRING-AWARE, so a ``{`` or ``}``
+    inside a quote/template does not break the function body (round 4, point 2)."""
     depth, j = 0, open_idx
-    cap = min(len(text), open_idx + 4000)
+    cap = min(len(text), open_idx + 8000)
+    q = ""
     while j < cap:
-        if text[j] == "{":
+        ch = text[j]
+        if q:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "\"'`":
+            q = ch
+        elif ch == "{":
             depth += 1
-        elif text[j] == "}":
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 return j
         j += 1
     return -1
+
+
+def _enclosing_fn(text: str, pos: int) -> "tuple[str, list] | None":
+    """The nearest NAMED function whose balanced body contains ``pos`` -> (name, [params])."""
+    best = None
+    for m in _FN_DECL_RE.finditer(text):
+        if m.start() > pos:
+            break
+        br = text.find("{", m.end())
+        if br == -1 or br - m.end() > 60:
+            continue
+        end = _balanced(text, br)
+        if end != -1 and br < pos <= end:
+            pm = re.search(r"\(([^)]*)\)", text[m.start():br])
+            params = [p.strip() for p in (pm.group(1).split(",") if pm else []) if p.strip()]
+            best = (m.group(1), params)       # keep the innermost enclosing (latest start)
+    return best
+
+
+def _fn_call_args(items) -> dict:
+    """Run-wide index {fname: [(basefile, first_arg_expr)]} — the call sites of named
+    functions across every file (the CALLER side of a cross-file taint, round 4 pt 2)."""
+    calls: dict = {}
+    for it in items or []:
+        sp = getattr(it, "saved_path", None)
+        if not sp:
+            continue
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        base = os.path.basename(sp)
+        for m in _CALL_NAME_RE.finditer(text):
+            name = m.group(1)
+            if name in _NOISE_CALLS:
+                continue
+            arg = _first_arg(text, m.end() - 1)
+            if arg:
+                calls.setdefault(name, [])
+                if len(calls[name]) < 20:
+                    calls[name].append((base, arg))
+    return calls
+
+
+def _first_arg(text: str, paren_idx: int) -> str:
+    """The first argument expression of a call whose ``(`` is at ``paren_idx`` (balanced,
+    stops at the top-level comma or the closing paren)."""
+    depth, j = 0, paren_idx
+    cap = min(len(text), paren_idx + 400)
+    start = paren_idx + 1
+    q = ""
+    while j < cap:
+        ch = text[j]
+        if q:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "\"'`":
+            q = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return text[start:j].strip()
+        elif ch == "," and depth == 1:
+            return text[start:j].strip()
+        j += 1
+    return ""
 
 
 def _fn_index(items) -> "tuple[dict, set]":
@@ -174,6 +266,11 @@ def _called_names(expr: str) -> list:
     return [m.group(1) for m in _CALL_NAME_RE.finditer(expr or "")]
 
 
+def _san_component(source: str) -> "str | None":
+    m = _SANITIZER_RE.search(source or "")
+    return _SAN_COMPONENT.get(m.group(1).lower()) if m else None
+
+
 def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     """Return clustered, classified sink records (for sinks.json). Each has `lead`
     True only for a real-tainted, actionable, non-noise cluster.
@@ -189,6 +286,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
     path_to_url = {it.saved_path: it.url for it in (items or []) if getattr(it, "saved_path", None)}
     text_by_base = _text_index(items)
     fn_returns, fn_defined = _fn_index(items)            # one-hop cross-file index (round 3 pt 4)
+    fn_call_args = _fn_call_args(items)                  # caller-side index (round 4 pt 2)
     clusters: dict = {}
 
     records = list(sink_records or []) + _discovered_records(items)
@@ -246,8 +344,8 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                     else:
                         untraced = True
 
-            # one-hop cross-file: a called helper whose RETURN is itself a source (point 4).
-            # Only claims taint when the return LITERALLY reaches a source — never a guess.
+            # one-hop cross-file (RETURN direction): a called helper whose RETURN is itself a
+            # source. Only claims taint when the return LITERALLY reaches a source (round 3).
             if untraced:
                 cand = (arg_expr + " " + source + " " + " ".join(chain))
                 for fname in _called_names(cand):
@@ -259,6 +357,33 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                             chain = chain + [f"{fname}() ⇒ {ret[:60]} (cross-file)"]
                             break
                     elif fname not in fn_defined and fname not in _NOISE_CALLS:
+                        crossfile_break = crossfile_break or fname
+
+            # one-hop cross-file (CALLER direction, round 4 pt 2): the sink sits inside a helper
+            # and uses its PARAMETER; the source is at the call site, often in another chunk —
+            # function ye(e){node.innerHTML=e}  (file A) ;  ye(location.hash)  (file B).
+            if untraced:
+                self_text = text_by_base.get(src_file, "")
+                sink_ids = (_root_idents(arg_expr) if arg_expr else []) or sink_arg_idents(kind, source)
+                encl = _enclosing_fn(self_text, _sink_offset(self_text, source, rec.get("pos"),
+                                                             rec.get("line")) or 0) if self_text else None
+                if encl and any(i in encl[1] for i in sink_ids):
+                    fname = encl[0]
+                    callsites = fn_call_args.get(fname) or []
+                    if callsites:
+                        for cbase, carg in callsites:
+                            lab2 = source_label(carg)
+                            c2: list = []
+                            if not lab2:
+                                ctext = text_by_base.get(cbase, "")
+                                ids = _root_idents(carg)
+                                if ctext and ids:
+                                    lab2, c2 = backtrace(ctext, ids)
+                            if lab2 and (sink_class != "url" or any(tok in lab2.lower() for tok in _INJECTABLE)):
+                                real, taint_source, untraced = True, lab2, False
+                                chain = chain + [f"{fname}({carg}) @ {cbase} (caller, cross-file)"] + c2
+                                break
+                    else:
                         crossfile_break = crossfile_break or fname
 
         key = _signature(kind, sink_class, source, real)
@@ -274,6 +399,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                 "tainted": tainted, "taint_source": taint_source, "real_taint": real,
                 "lead": lead, "untraced": untraced and not real,
                 "caller_chain": chain, "crossfile_break": crossfile_break,
+                "sanitizer": _san_component(source),
                 "detector": "jsluice:sinks" if not rec.get("discovered") else f"taint:{rec.get('framework', 'dom')}",
                 "severity_hint": sev if real else "info",
                 "confidence": conf if real else "low",

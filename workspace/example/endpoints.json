@@ -13,6 +13,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "https://api.target.tld/v1"
@@ -31,6 +32,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": true,
+    "fold_partial": false,
     "fetchable": false,
     "detector": "jsluice",
     "url": "EXPR/users/EXPR/orders/123"
@@ -51,6 +53,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/admin/users/promote"
@@ -69,6 +72,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v1/auth/login"
@@ -89,6 +93,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v1/auth/reset-password"
@@ -107,6 +112,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/graphql"
@@ -127,6 +133,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v0/legacy/export?user_id=1"
@@ -145,6 +152,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "wss://api.target.tld/socket"
@@ -163,6 +171,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v1/profile/me"
@@ -181,6 +190,7 @@
     "party": "vendor",
     "in_scope": true,
     "dynamic": false,
+    "fold_partial": false,
     "fetchable": true,
     "detector": "jsluice",
     "url": "/api/v2/users/me/settings"
@@ -199,6 +209,7 @@
     "party": "first",
     "in_scope": true,
     "dynamic": true,
+    "fold_partial": true,
     "fetchable": true,
     "detector": "strings",
     "url": "https://api.target.tld/v1/users/EXPR/orders/123"

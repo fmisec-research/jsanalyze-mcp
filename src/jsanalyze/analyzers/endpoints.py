@@ -176,6 +176,7 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
             "party": party_of(src_file, origin or "", scope_hosts),
             "in_scope": _in_scope(host, scope_hosts),
             "dynamic": "EXPR" in url,
+            "fold_partial": bool(rec.get("fold_partial")),
             "fetchable": kind in ("absolute", "rooted") and string_kind != SPA_ROUTE,
             "detector": rec.get("detector") or "jsluice",
             "url": url,
@@ -350,8 +351,11 @@ def classify_endpoint(norm: dict):
         return ("auth-endpoint", "hunt-auth-bypass", "medium", "medium", "auth surface")
     if params & _ID_PARAMS:
         return ("idor-candidate", "hunt-idor", "medium", "medium", "id-ish parameter")
+    # a half-folded string endpoint (round 4 pt 1): its EXPR is a build gap, not proof of an
+    # id segment — don't let a failed baseURL/concat fold masquerade as IDOR.
+    fold_partial = bool(norm.get("fold_partial"))
     for i, s in enumerate(segs):
-        is_id = s.isdigit() or bool(_UUID_RE.match(s)) or s == "expr"
+        is_id = s.isdigit() or bool(_UUID_RE.match(s)) or (s == "expr" and not fold_partial)
         if is_id and i > 0 and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", segs[i - 1]):
             return ("idor-candidate", "hunt-idor", "medium", "medium",
                     f"resource id ({segs[i-1]}/{s})")
