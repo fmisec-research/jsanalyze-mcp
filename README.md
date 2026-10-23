@@ -205,9 +205,3 @@ PYTHONPATH=src python3 tests/test_regression.py   # locks the real-run failure s
 each shape that used to slip through — multi-hop `{__html:t}`, webpack-4 `webpackJsonp`, a SPA
 route misread as auth, a postMessage listener with no sink, a `*_token` cookie, a duplicated
 secret, a CSP internal host — and asserts the v2 behavior, so a regression fails loudly.
-
-# BONUS
-KO BISA??????????
-
-<img width="916" height="110" alt="image" src="https://github.com/user-attachments/assets/eb747d58-c835-4c33-9b31-372135bee1cc" />
-<img width="942" height="369" alt="image" src="https://github.com/user-attachments/assets/b13fc607-c923-4105-966a-4b8e0c30be68" />
