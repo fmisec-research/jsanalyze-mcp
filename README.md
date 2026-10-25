@@ -26,7 +26,7 @@ The pipeline extracts and then judges:
 ## Requirements
 
 - Python 3.10 or newer
-- Go, only if `setup` must build [jsluice](https://github.com/BishopFox/jsluice) from the project fork. An existing `jsluice` on `PATH` or in `~/go/bin` is enough.
+- [jsluice](https://github.com/0xshdax/jsluice), the upgraded fork. Extraction uses this binary, not upstream BishopFox. The fork keeps the original `urls` and `secrets` modes and adds `sinks`, `postmessage`, and `sourcemaps`, plus template-literal URLs and a larger secret-matcher set. `setup` installs `github.com/0xshdax/jsluice/cmd/jsluice@latest`. Go is required only when that install has to compile it. A binary already on `PATH` or in `~/go/bin` is used as-is after `setup` checks that the fork modes run.
 - Node.js, optional, for `retire`
 - Optional tools, detected on `PATH` and skipped when absent: `js-beautify`, `linkfinder`, `trufflehog`, `gitleaks`, `retire`, `sourcemapper`, `unwebpack-sourcemap`
 
@@ -49,7 +49,7 @@ setup
 status
 ```
 
-`setup` installs or verifies jsluice and is safe to run again. `status` reports jsluice, Go, config, and which optional tools are present.
+`setup` installs or verifies the [0xshdax/jsluice](https://github.com/0xshdax/jsluice) fork and is safe to run again. It rejects an upstream binary that does not implement `sinks` and `sourcemaps`. `status` reports the resolved binary, whether those fork modes pass, Go, config, and which optional tools are present.
 
 ## Connect a client
 
