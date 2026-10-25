@@ -1,207 +1,236 @@
 # jsanalyze-mcp
 
-An MCP server that turns **JavaScript you captured** (a Burp Suite XML export, a folder of
-`.js`/`.map`, or a HAR) into a **triaged, de-noised analysis**: endpoints, DOM-XSS sinks,
-secrets, vulnerable libraries, postMessage handlers, feature flags, SPA routes, storage writes,
-GraphQL operations, a webpack chunk map, recovered sourcemap sources — and a prioritized
-`leads.json` where each candidate is tagged with the `hunt-*` skill that would prove it.
+MCP server for offline analysis of JavaScript you already captured. Give it a Burp Suite XML export, a HAR file, or a directory of `.js` and `.map` files. It returns a scored queue of leads, with the evidence needed to decide what to test next.
 
-The tool does the mechanical work **and** the first-pass triage (clustering, party split,
-taint-gating, normalization) so that when you drive it with a model, the model *triages* the
-artifacts instead of re-reading 30k-line bundles.
+The server reads local artifacts only. It does not crawl, and it does not send requests to the target. Fetching an external source map, verifying a secret, or running GraphQL introspection stays behind `allow_network`, which is off by default.
 
-> **It never touches the target.** It only processes artifacts you supply. Anything that would
-> reach the network (fetching an external `.map`, verifying a secret, GraphQL introspection) is
-> behind an Operator Gate (`allow_network`, off by default).
+A synthetic demo run is in [`workspace/example/`](workspace/example/). It contains no data from a real target.
 
-A ready-to-read demo lives in [`workspace/example/`](workspace/example/) (generated from the
-synthetic fixture — no real-target data).
+## What you get
 
----
+Each run writes `workspace/<YYYY-MM-DD>_<label>/`. Start with `leads.json` and `report.md`.
 
-## 1. Requirements
+A lead is a candidate, not a finding. `severity_hint` and `confidence` describe potential. The queue is ordered by `score`. Proof is an observed effect across a trust boundary, done later with the `hunt-*` skill named on the lead. `caller_chain`, `body_keys`, `negative_control`, and `experiment` say what to try, so the model does not have to re-read the bundle.
 
-- **Python ≥ 3.10**
-- **Go** — only if `setup` has to build jsluice from source (the fork ships no binary). If
-  `jsluice` is already on `$PATH`/`~/go/bin`, `setup` just verifies it.
-- **Node/npm** — for `retire.js` (vulnerable-library scan). Optional.
-- Optional enricher tools on `$PATH` (auto-detected, skipped if absent): `js-beautify`,
-  `linkfinder`, `trufflehog`, `gitleaks`, `retire`, `sourcemapper`, `unwebpack-sourcemap`.
+The pipeline extracts and then judges:
 
-## 2. Install
+- Endpoints, with method, body keys, and whether the same request appears in the capture
+- DOM sinks, kept only when attacker-controlled data reaches them
+- `postMessage` listeners, wildcard senders, and weak origin checks
+- Secrets, split into public-by-design and private
+- Vulnerable libraries, and calls whose output reaches an HTML sink
+- SPA routes, feature flags, storage writes, GraphQL operations
+- Webpack and Vite chunks, including chunks missing from the capture
+- CSP hosts, response fields, and notes recovered from source maps
+
+## Requirements
+
+- Python 3.10 or newer
+- Go, only if `setup` must build [jsluice](https://github.com/BishopFox/jsluice) from the project fork. An existing `jsluice` on `PATH` or in `~/go/bin` is enough.
+- Node.js, optional, for `retire`
+- Optional tools, detected on `PATH` and skipped when absent: `js-beautify`, `linkfinder`, `trufflehog`, `gitleaks`, `retire`, `sourcemapper`, `unwebpack-sourcemap`
+
+Without `retire`, `trufflehog`, and `gitleaks`, a count of zero secrets or zero vulnerable libraries means those scanners did not run. It is not evidence that the bundle is clean.
+
+## Install
 
 ```bash
-cd jsanalyze-mcp
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[brotli]'      # brotli recommended — CDN JS is often brotli-encoded
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[brotli]'
 ```
 
-Register with your MCP client (Claude Desktop / Claude Code), e.g. `mcp.json`:
+The `brotli` extra is recommended. CDN JavaScript is often Brotli-compressed, and Burp stores that body as-is. The extra requires `brotli>=1.2.1` (CVE-2026-111497 is an out-of-bounds write in older decoders). gzip and deflate need no extra package.
+
+Confirm the engine:
+
+```text
+setup
+status
+```
+
+`setup` installs or verifies jsluice and is safe to run again. `status` reports jsluice, Go, config, and which optional tools are present.
+
+## Connect a client
+
+The server speaks MCP over stdio. Point the client at the `jsanalyze-mcp` executable inside the virtualenv.
+
+OpenCode 2:
+
+```bash
+opencode mcp add jsanalyze -- /absolute/path/to/.venv/bin/jsanalyze-mcp
+```
+
+OpenCode 1, in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "jsanalyze": {
-      "command": "/home/kali/jsanalyze-mcp/.venv/bin/jsanalyze-mcp"
+      "type": "local",
+      "command": ["/absolute/path/to/.venv/bin/jsanalyze-mcp"],
+      "enabled": true
     }
   }
 }
 ```
 
-Verify the engine once:
+Any other MCP client uses the same command:
 
-```text
-setup      # installs/verifies jsluice (0xshdax fork); idempotent
-status     # jsluice + fork modes, Go, config, which enricher tools are present
+```json
+{
+  "mcpServers": {
+    "jsanalyze": {
+      "command": "/absolute/path/to/.venv/bin/jsanalyze-mcp"
+    }
+  }
+}
 ```
 
-## 3. Prepare input (you do this — the tool never crawls)
+Restart the client after changing the config so it loads the new process.
 
-`analyze` accepts three **local** sources:
+## Prepare a capture
 
-| Source | How to produce it |
+`analyze` accepts three local inputs.
+
+| Input | How to produce it |
 |---|---|
-| **Burp XML** | In Burp, select the JS (and HTML) items → right-click → **Save selected items** → `foo.xml`. Responses are stored base64; the tool decodes, de-chunks and de-compresses (gzip/deflate/brotli) them. HTML items also contribute their inline `<script>` and `<script src>` list. |
-| **Directory** | A folder of already-saved `*.js` (and `*.map`) files. |
-| **HAR** | A `.har` capture; JS and HTML responses are used. |
+| Burp XML | Select the JavaScript and HTML items, then **Save selected items**. The tool base64-decodes each body, removes chunked encoding, and decompresses gzip, deflate, and Brotli. HTML contributes inline scripts, `script src`, CSP, and JSON responses. |
+| Directory | A folder of `*.js` and `*.map` files. There is no request history, so the tool will not claim that an endpoint is untested. |
+| HAR | A `.har` file. JavaScript and HTML responses are used, and `postData` is read for the traffic delta. |
 
-## 4. Use it
+Put captures in `input/`. That directory is gitignored. Do not paste an export into chat.
 
-### A. The easy way — the `js_analyze` prompt
-The server ships a prompt (`prompts/js-analyze.md`). In your client pick **js_analyze**
-(optionally set `input_path`); it seeds the model with the doctrine: run `analyze`, pull the
-queue with `leads`, drill in with `query`/`read_span`, finish the reachability/body-shape
-judgment, and present a fixed, tidy report.
+## Run an analysis
 
-### B. Direct tool calls
+The server registers one prompt, `js_analyze` (`prompts/js-analyze.md`). Select it in the client, or send this:
 
 ```text
-# 1) analyze a source → writes artifacts into workspace/<run>/ and returns a summary + issues[]
-analyze(input_path="input/foo.xml", label="acme", scope_hosts=["acme.com"])
-analyze(input_path="~/dumps/js-dir/")         # a directory of .js/.map
-analyze(input_path="~/dumps/session.har")     # a HAR
+Use the jsanalyze MCP and follow the js_analyze prompt.
+analyze(input_path="/absolute/path/to/input/capture.xml", label="app", scope_hosts=["app.example"])
+Read issues[]. Triage with leads(), highest score first.
+Do not open secrets.json and do not print a full secret.
+Do not fetch the target. Leave allow_network off.
+Write the report described in section 4 of the prompt.
+```
 
-# 2) list runs
+`scope_hosts` is a list of hostnames, without a port or scheme. `app.example` also matches `api.app.example`. `localhost:3000` does not match host `localhost`, so a local app captured on port 3000 is scoped as `localhost`.
+
+Direct tool calls:
+
+```text
+analyze(input_path="input/capture.xml", label="app", scope_hosts=["app.example"])
+analyze(input_path="~/dumps/js/")
+analyze(input_path="~/dumps/session.har")
+
 runs()
+leads("2026-01-01_app", min_confidence="medium")
+leads("2026-01-01_app", cls="xss-sink")
+leads("2026-01-01_app", party="first")
 
-# 3) pull the filtered lead queue (NOT report.md) — your worklist
-leads("2026-… _acme", min_confidence="medium")
-leads("2026-…_acme", cls="xss-sink")          # filter by class
-leads("2026-…_acme", party="first")           # first-party only
-
-# 4) drill into a lead without opening a huge bundle
-read_span("2026-…_acme", "app.js__<hash>.js", 1850, radius=40)
-query("2026-…_acme", "app.js__<hash>.js",
+read_span("2026-01-01_app", "app.js__<hash>.js", 1850, radius=40)
+query("2026-01-01_app", "app.js__<hash>.js",
       "(call_expression function: (identifier) @f (#match? @f \"fetch\"))")
 ```
 
-`scope_hosts` matters: it drives `party` (a URL on an out-of-scope host → `third`) and each
-endpoint's `in_scope` flag. A base domain matches its subdomains (`acme.com` ⊇ `api.acme.com`).
+The bundled demo was produced with:
 
-### Worked example (the bundled demo)
-`workspace/example/` was produced by:
-
-```bash
+```text
 analyze(input_path="tests/fixtures/example.xml", label="example", scope_hosts=["target.tld"])
 ```
 
-Open `workspace/example/report.md` for the rendered report, or `leads.json` for the queue
-(sink tainted by `location.hash`, a no-origin-check postMessage listener, BFLA/auth endpoints,
-masked secrets, a vulnerable jQuery). `sinks.json` shows the audit side: clusters that were
-**not** promoted to leads (vendor/constant/non-tainted) with their occurrence counts.
+Read `workspace/example/report.md` for the rendered report and `leads.json` for the queue.
 
-## 5. Tools
+## Tools
 
 | Tool | Purpose |
 |---|---|
-| `setup()` | Install & verify jsluice (idempotent). |
-| `status()` | Read-only: jsluice + fork modes, Go, config, enricher-tool availability. |
-| `analyze(input_path, label?, scope_hosts?, modes?, keep_js?)` | Full pipeline → triage → write artifacts; returns summary + `issues[]`. |
-| `runs(limit?)` | List existing runs with lead counts. |
-| `leads(run, cls?, party?, tainted?, min_confidence?)` | The filtered lead queue. |
-| `query(run, file, q)` | Run a jsluice tree-sitter query against one JS file of a run. |
+| `setup()` | Install and verify jsluice. Safe to repeat. |
+| `status()` | jsluice, Go, config, and which optional tools are installed. |
+| `analyze(input_path, label?, scope_hosts?, modes?, keep_js?)` | Run the pipeline and write the workspace. Returns a summary and `issues[]`. |
+| `runs(limit?)` | List runs and their lead counts. |
+| `leads(run, cls?, party?, tainted?, min_confidence?)` | Filtered lead queue, highest score first. |
+| `query(run, file, q)` | One jsluice tree-sitter query against one file in a run. |
 | `read_span(run, file, line, radius?)` | A slice of a bundle around a line. |
 
-## 6. Artifacts — `workspace/<YYYY-MM-DD>_<label>/`
+## Artifacts
+
+All paths are under `workspace/<YYYY-MM-DD>_<label>/`.
 
 | File | Contents |
 |---|---|
-| `leads.json` | **Distilled, gated candidate queue** — distinct leads, secrets masked, ordered by a **composite `score`** (not raw severity). Each lead carries `suggested_skill`, `score`+`score_factors`, `caller_chain` (taint hops), `body_keys`, `seen_in_history`, `negative_control`, and the one `experiment` to run. |
-| `report.md` | Human-readable report (masked) — the base for a model's triage. |
-| `endpoints.json` / `.txt` | Normalized endpoints (`method,path,host,query,body_keys,call_type,party,in_scope,dynamic,fetchable`) / clean fetchable feed for ffuf/httpx. |
-| `sinks.json` | Clustered DOM sinks: `sink_class, party, real_taint, lead, untraced, count, occurrences` (audit). `lead=true` → `xss-sink`; a first-party HTML/JS `untraced` cluster → a **low** `sink-untraced` lead (not silence). |
-| `postmessage.json` | `postmessage-listener` / `-sender`(`"*"`) / `-origin-bypass` / `onmessage`. |
-| `secrets.json` | Full secret values (jsluice+gitleaks+trufflehog, deduped) — **sensitive, gitignored**. |
-| `libs.json` | Vulnerable libraries (retire.js): component, version, CVE, CWE, severity. |
-| `flags.json` `routes.json` `storage.json` `graphql.json` `chunks.json` `framework.json` | The judgment layer the tool computes: SDK/UI feature flags, SPA routes, localStorage/cookie writes, GraphQL operations, webpack/Vite chunk map (present/missing, with **reconstructed URLs** for webpack4 `webpackJsonp` + Vite), detected framework (+ XSS/pollution gadgets). |
-| `csp.json` | CSP `connect-src`/`frame-src`/… hosts parsed from the HTML response headers in the same capture (zero network) — internal/framed hosts the app is allowed to reach. |
-| `history.json` | The requests the operator ACTUALLY sent — method+URL **and the decoded `<request>` body / HAR postData** (body keys incl. nested + multipart, query keys, GraphQL op incl. Apollo batch & GET `?query=`) **and the auth header / session-cookie NAMES** (values masked → the replay recipe). Drives the **JS-vs-traffic delta** (PATH-first: an endpoint with no method still matches a `GET`), the **body delta** (`body-field-unsent`), GraphQL-op coverage, and the per-lead replay hint. "API exercised" needs a real backend call — assets, the site root and static HTML don't count. |
-| `source_notes.json` | Comments / mock-data paths / internal hosts / credentials mined from recovered `sources/` (sourcemap archaeology jsluice ignores). |
-| `responses.json` | What the operator's captured requests RETURNED — JSON responses whose keys include sensitive fields (over-fetch / token leak), and inline-handler / `javascript:` sinks in captured HTML. Only a Burp/HAR export carries this; zero network. |
-| `sourcemaps.json` + `sources/` | `.map` references + sources reconstructed from inline/local maps (re-scanned for leads); each un-recovered external `.map` becomes a `sourcemap` lead (fetch = Operator Gate). |
-| `issues.json` | Enricher/jsluice failures (surfaced, not swallowed). |
-| `js/*.js` | Decoded + beautified bodies (line numbers in leads refer here). |
+| `leads.json` | Scored candidate queue. Secrets are masked. Each lead has `suggested_skill`, `score`, `score_factors`, `caller_chain`, `body_keys`, `seen_in_history`, `negative_control`, and `experiment`. |
+| `report.md` | Rendered report. A model should refine this, not replace the evidence. |
+| `endpoints.json`, `endpoints.txt` | Normalized endpoints. The text file lists fetchable paths for a later, authorized pass. |
+| `sinks.json` | Clustered DOM sinks, including clusters that were not promoted. |
+| `postmessage.json` | Listeners, wildcard senders, weak origin checks, and WebSocket `onmessage` (audit only). |
+| `secrets.json` | Full secret values. Gitignored. Do not print it. |
+| `libs.json` | retire.js results: component, version, CVE, severity. |
+| `flags.json`, `routes.json`, `storage.json`, `graphql.json`, `chunks.json`, `framework.json` | Feature flags, SPA routes, storage writes, GraphQL operations, chunk map, framework and gadgets. |
+| `csp.json` | Hosts from CSP `connect-src` and `frame-src` in the captured HTML. |
+| `history.json` | Requests in the capture: method, URL, body keys, query keys, GraphQL operation names, and auth header or cookie names. Values are not stored. |
+| `responses.json` | Sensitive keys in captured JSON responses, and inline handlers in captured HTML. |
+| `source_notes.json` | Comments, mock paths, internal hosts, and credential-shaped strings mined from recovered source. |
+| `sourcemaps.json`, `sources/` | Inline or local source maps, reconstructed and scanned again. An external `.map` that was not fetched is a `sourcemap` lead, not a download. |
+| `issues.json` | Failed enrichers. An empty list means the steps that ran did not fail. It does not mean every optional tool was installed. |
+| `js/` | Decoded and beautified bodies. Line numbers in leads refer to these files. |
 
-## 7. Lead taxonomy → proving skill
+`seen_in_history: false` is meaningful only when the capture contains real API traffic. A directory of JavaScript files, or a Burp export that is only script URLs, does not support that claim.
 
-| `class` | From | `suggested_skill` |
+GET and POST of the same path are separate rows. A method that never appears in the capture stays untested even if another method of that path was sent. `ClientApi.post(url, { ... })` and a multi-line `JSON.stringify({ ... })` contribute body keys. A string that is only the tail of a concatenation, such as `'/note'` at the end of `'/api/' + id + '/note'`, is not its own endpoint.
+
+## Lead classes
+
+| Class | When it is raised | Skill |
 |---|---|---|
-| `idor-candidate` | endpoint `resource/{id}` or id-ish param | `hunt-idor` |
-| `bfla-candidate` | endpoint `/admin`·`/internal` path **segment** | `hunt-api` |
-| `auth-endpoint` | endpoint `/auth`·`/login`·`/token`… segment | `hunt-auth-bypass` |
-| `graphql-candidate` | endpoint `/graphql` | `hunt-graphql` |
-| `api-version` | endpoint `/v0`·`/beta`·`/legacy` | `hunt-api` |
-| `secret-location` | secret (cloud key → `hunt-cloud`) | `hunt-secrets-disclosure` |
-| `cloud-config` | Firebase web config (`apiKey`+`authDomain`+`projectId`/`databaseURL`, lone `AIza` **folded** in) or a Supabase/cloud `createClient(url, anonKey)` — one lead, exposure = the RLS/security rules not the public key | `hunt-cloud` |
-| `xss-sink` | sink — **gated**: real attacker-taint only, clustered (url-class → `open-redirect` unless `javascript:`/`data:`) | `hunt-xss` |
-| `open-redirect` | a tainted navigation target (`location`/`href`/`assign`) with no `javascript:`/`data:` scheme | `hunt-open-redirect` |
-| `response-exposure` | a captured JSON response returns sensitive fields (token/role/email/…) — over-fetch (API3) + IDOR pivot on its ids | `hunt-api` |
-| `html-sink` | inline `on*=` handler / `href="javascript:"` in captured HTML (jsluice reads only `<script>`) | `hunt-xss` |
-| `client-controlled-value` | the client sends a money field (`price`/`total`/`amount`/`qty`) the server should own | `hunt-business-logic` |
-| `postmessage-listener` / `-sender` / `-origin-bypass` | postMessage families | `hunt-xss` (/ `hunt-auth-bypass` if token) |
-| `feature-gate` | `ui-gate` flag (isAdmin / plan===) | `hunt-api` |
-| `vulnerable-library` | retire.js (CWE-driven; **low** until the vulnerable fn is proven called) | `hunt-xss`(79)/`hunt-injection`(89)/`hunt-server-side`(77/78/94/502)/`hunt-js-analysis` |
-| `vulnerable-call` | a vulnerable retire component whose call output (e.g. `DOMPurify.sanitize`) **reaches an HTML sink** — the vulnerable path is actually REACHED, not just present | `hunt-xss` |
-| `websocket` | `ws(s)://` · `/websocket` · socket.io | `hunt-websocket` |
-| `endpoint-unverified` | in-scope API in the bundle but **never in captured traffic** | `hunt-api` |
-| `body-field-unsent` | an **authz/money** body/query field (`role`·`isAdmin`·`plan`·`price`·`owner`·`tenant`…) the bundle can send but the operator **never did** (joins JS `body_keys` with the real `<request>` body) | `hunt-api` |
-| `graphql-unsent` | a GraphQL operation in the bundle never seen in a sent POST (one `POST /graphql` ≠ every operation tested) | `hunt-graphql` |
-| `endpoint-hidden` | first-party SPA route with no fetch equivalent, not in traffic | `hunt-api` |
-| `token-storage` | token/jwt/session/`*_token` written to cookie/localStorage | `hunt-auth-bypass` |
-| `graphql-operation` | a parsed query/mutation (variables = body_keys) | `hunt-graphql` |
-| `csp-endpoint` | internal/framed host in CSP `connect/frame-src`, not in traffic | `hunt-api` |
-| `framework-gadget` | `bypassSecurityTrust*` · `v-html` · dynamic `javascript:` · `__NEXT_DATA__` · lodash/jQuery deep-merge | `hunt-xss` / `hunt-server-side` |
-| `oauth-implicit` / `oauth-redirect` | `response_type=token` (implicit flow) · `redirect_uri` construction | `hunt-auth-bypass` |
-| `mock-data-path` | `mock`/`dummyData`/`fixture` path mined from recovered source (may serve real prod data) | `hunt-js-analysis` |
-| `sourcemap` | external `.map` referenced but not recovered (URL only) | `hunt-js-analysis` |
-| `sink-untraced` | first-party HTML/JS sink whose identifier arg the **single-file** tracer could not tie to a source — **low** audit lead (helper may be in another chunk; confirm by hand) | `hunt-xss` |
+| `idor-candidate` | `resource/{id}` or an id-shaped parameter | `hunt-idor` |
+| `bfla-candidate` | Path segment `/admin`, `/internal`, or similar | `hunt-api` |
+| `auth-endpoint` | Path segment `/auth`, `/login`, `/token`, or similar | `hunt-auth-bypass` |
+| `graphql-candidate` | Path `/graphql` | `hunt-graphql` |
+| `api-version` | Path segment `/v0`, `/beta`, `/legacy` | `hunt-api` |
+| `endpoint-unverified` | In-scope API present in the bundle and absent from traffic | `hunt-api` |
+| `endpoint-hidden` | First-party SPA route with no matching fetch, absent from traffic | `hunt-api` |
+| `body-field-unsent` | An authorization or money field the bundle can send and this capture never sent | `hunt-api` |
+| `client-controlled-value` | The client sends `price`, `total`, `amount`, or `quantity` | `hunt-business-logic` |
+| `xss-sink` | Attacker-controlled data reaches an HTML or script sink | `hunt-xss` |
+| `open-redirect` | A tainted navigation target with no `javascript:` or `data:` scheme | `hunt-open-redirect` |
+| `html-sink` | Inline `on*=` handler or `javascript:` URL in captured HTML | `hunt-xss` |
+| `sink-untraced` | First-party HTML or script sink the single-file tracer could not tie to a source. Capped, low. | `hunt-xss` |
+| `postmessage-listener` | `message` listener with no verifiable origin check | `hunt-xss` |
+| `postmessage-origin-bypass` | Origin check is a prefix or substring test | `hunt-xss` |
+| `postmessage-sender` | `postMessage` to `"*"` | `hunt-xss`, or `hunt-auth-bypass` when the payload looks like a token |
+| `secret-location` | A private secret. Public keys (`pk_`, analytics, Sentry DSN) stay informational. | `hunt-secrets-disclosure` |
+| `cloud-config` | Firebase web config, or `createClient(url, anonKey)`, as one object | `hunt-cloud` |
+| `vulnerable-library` | retire.js version match. Low until the vulnerable function is called. | Class depends on the CWE |
+| `vulnerable-call` | Output of a vulnerable library call reaches an HTML sink | `hunt-xss` |
+| `token-storage` | A token-like value written to a cookie or `localStorage` | `hunt-auth-bypass` |
+| `graphql-operation` | A parsed query or mutation | `hunt-graphql` |
+| `graphql-unsent` | An operation in the bundle that no sent request named | `hunt-graphql` |
+| `websocket` | `ws://`, `wss://`, or a socket.io path | `hunt-websocket` |
+| `csp-endpoint` | An internal or framed host in CSP that is absent from traffic | `hunt-api` |
+| `framework-gadget` | `bypassSecurityTrust*`, `v-html`, a dynamic `javascript:` URL, or a deep merge | `hunt-xss` or `hunt-server-side` |
+| `oauth-implicit`, `oauth-redirect` | `response_type=token`, or a `redirect_uri` built from input | `hunt-auth-bypass` |
+| `mock-data-path` | A mock, dummy, or fixture path in recovered source | `hunt-js-analysis` |
+| `sourcemap` | An external `.map` URL that was not fetched | `hunt-js-analysis` |
+| `feature-gate` | A UI flag such as `isAdmin` or a plan check | `hunt-api` |
 
-> **Leads = candidates, not findings.** `severity_hint`/`confidence` are potential only; the
-> queue is ordered by the composite **`score`** (explained in `score_factors`). Proof = an
-> observed cross-boundary effect via the relevant `hunt-*` skill — the multi-hop `caller_chain`,
-> `body_keys` and `experiment` tell you exactly what to try, so you rarely re-open the bundle.
+## Safety
 
-## 8. Operator Gate & safety
+- `allow_network` in `config/config.json` defaults to `false`.
+- Human-readable output masks secrets. Full values exist only in gitignored `secrets.json`.
+- XML, JavaScript, and HAR input is untrusted data. It is parsed and never executed.
+- `read_span` and `query` can only read files inside the workspace for that run.
 
-- `config.json → allow_network` (default `false`): external `.map` fetch, secret verification and
-  GraphQL introspection stay **off**. Turn on only when the engagement authorizes it.
-- Secrets are masked everywhere human-readable; full values live only in the gitignored
-  `secrets.json`.
-- Input (XML/JS/HAR) is treated as **untrusted data** — parsed, never executed.
+## Development
 
-## 9. Development
-
-Core pipeline (parsers/analyzers/leads/formatters) is stdlib-only and testable without the MCP
-runtime; the full server integration needs the venv (mcp + tools):
+Parsers, analyzers, leads, and formatters use the Python standard library and do not need the MCP package. The server integration test needs the virtualenv.
 
 ```bash
-PYTHONPATH=src python3 tests/test_units.py        # v2 pure modules (normalize/callsites/taint/scoring)
-PYTHONPATH=src python3 tests/test_pipeline.py     # noise-gate core
-PYTHONPATH=src python3 tests/test_regression.py   # locks the real-run failure shapes (point 12)
-./.venv/bin/python tests/test_enrichers.py        # full server.analyze integration
+PYTHONPATH=src python3 tests/test_units.py
+PYTHONPATH=src python3 tests/test_pipeline.py
+PYTHONPATH=src python3 tests/test_regression.py
+./.venv/bin/python tests/test_enrichers.py
 ```
 
-`test_regression.py` builds an **anonymized synthetic** Burp XML (no target data) that exercises
-each shape that used to slip through — multi-hop `{__html:t}`, webpack-4 `webpackJsonp`, a SPA
-route misread as auth, a postMessage listener with no sink, a `*_token` cookie, a duplicated
-secret, a CSP internal host — and asserts the v2 behavior, so a regression fails loudly.
+`test_regression.py` builds an anonymized Burp XML. It locks the cases that used to poison the queue: multi-hop taint, a webpack 4 chunk map, a SPA route misread as an API, a `postMessage` listener with and without a sink, a duplicated secret, and a CSP host.

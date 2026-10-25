@@ -1,6 +1,6 @@
 [project]
 name = "jsanalyze-mcp"
-version = "0.1.0"
+version = "1.0.0"
 description = "MCP server for analyzing JavaScript captured in Burp Suite XML exports (jsluice-powered)."
 requires-python = ">=3.10"
 dependencies = [
