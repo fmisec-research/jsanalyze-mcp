@@ -10,7 +10,9 @@ dependencies = [
 [project.optional-dependencies]
 # Decode brotli-encoded (Content-Encoding: br) responses — common for CDN-served JS.
 # gzip/deflate/chunked are handled with stdlib zlib and need nothing extra.
-brotli = ["brotli>=1.1.0"]
+# Floor is 1.2.1: CVE-2026-111497 is an out-of-bounds write in the decoder
+# (1.0.3 through 1.2.0). Burp bodies are untrusted compressed input.
+brotli = ["brotli>=1.2.1"]
 
 # The core pipeline (parsers/analyzers/leads/formatters/utils) is pure stdlib and needs
 # NO third-party packages — only `server.py` imports `mcp` (and brotli is optional).
