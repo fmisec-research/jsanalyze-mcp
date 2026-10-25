@@ -26,12 +26,18 @@ import re
 
 __all__ = ["request_shape", "object_keys"]
 
-_REQ_NEAR_RE = re.compile(
-    r"\b(?:fetch|axios|request|superagent|ky|got|\$http|\$\.ajax|xhr|XMLHttpRequest|"
+# A request call head. `.get(` only counts when the receiver looks like an HTTP client
+# (`ClientApi.get`, `axios.get`); `params.get(` and `map.get(` are not requests.
+# `.post/.put/.patch/.delete/.del(` are rare outside HTTP wrappers, so any receiver counts.
+_CALL_HEAD_RE = re.compile(
+    r"(?:\b(?:fetch|axios|request|superagent|ky|got|\$http|\$\.ajax|xhr|XMLHttpRequest|"
     r"sendBeacon|useSWR|useQuery|useMutation|client|api|http)\b"
-    r"(?:\s*\.\s*(?P<verb>get|post|put|patch|delete|head|options|request|ajax|fetch))?",
+    r"(?:\s*\.\s*(?P<v1>get|post|put|patch|delete|head|options|request|ajax|fetch))?|"
+    r"(?P<recv>[A-Za-z_$][\w$]*)\s*\.\s*(?P<v2>get|post|put|patch|delete|del))"
+    r"\s*\(",
     re.IGNORECASE,
 )
+_GET_RECV_RE = re.compile(r"(?:api|client|http|axios|xhr|request)$", re.IGNORECASE)
 _VERB_WORDS = ("get", "post", "put", "patch", "delete", "head", "options")
 _METHOD_KEY_RE = re.compile(r"""\bmethod\s*:\s*(['"])(?P<m>[a-zA-Z]+)\1""")
 _BODY_KEY_RE = re.compile(r"\b(?:body|data)\s*:")
@@ -175,29 +181,76 @@ def _body_keys_from_arg(arg: str, text: str = "") -> list:
     return keys
 
 
-def request_shape(text: str, line: int, radius: int = 2) -> dict:
-    """Recover ``{"method", "body_keys"}`` for the request call at/near ``line``."""
+def _verb_of(m) -> str:
+    """HTTP verb from a ``_CALL_HEAD_RE`` match, or '' if this `.get(` is not a client."""
+    if m.group("v2"):
+        verb = m.group("v2").lower()
+        if verb == "get" and not _GET_RECV_RE.search(m.group("recv") or ""):
+            return ""
+        return "DELETE" if verb == "del" else verb.upper()
+    return (m.group("v1") or "").upper()
+
+
+def _line_offset(text: str, line: int) -> int:
+    off = 0
+    for i, ln in enumerate(text.splitlines(keepends=True)):
+        if i + 1 >= line:
+            return off
+        off += len(ln)
+    return off
+
+
+def _find_call(text: str, line: int, needle: str = ""):
+    """The request call that contains ``needle`` at/after ``line``.
+
+    The parse uses the real file, not a ±2-line window: a ``fetch`` whose
+    ``JSON.stringify({...})`` body starts a few lines below the URL was being
+    cut off before its keys. Returns ``(verb, args)`` or ``("", "")``.
+    """
+    if not text:
+        return "", ""
+    off = _line_offset(text, line or 1)
+    at = text.find(needle, off) if needle else off
+    if at == -1:
+        at = off
+    lo = max(0, at - 220)
+    hi = min(len(text), at + 2000)
+    for m in _CALL_HEAD_RE.finditer(text, lo, hi):
+        verb = _verb_of(m)
+        if verb == "" and m.group("v2"):
+            continue
+        paren = m.end() - 1
+        if paren < 0 or paren >= len(text) or text[paren] != "(":
+            continue
+        args, end = _balanced(text, paren, "(", ")")
+        if end == -1:
+            continue
+        if needle:
+            if needle not in args or not (paren <= at <= end):
+                continue
+        elif abs(paren - at) > 400 and not (paren <= at <= end):
+            continue
+        return verb, args
+    return "", ""
+
+
+def request_shape(text: str, line: int, radius: int = 2, needle: str = "") -> dict:
+    """Recover ``{"method", "body_keys"}`` for the request call at/near ``line``.
+
+    ``radius`` is accepted for callers that still pass it; the call is read from
+    the full file so a multi-line body is not truncated. ``needle`` (the URL or
+    path literal) selects the call that actually contains it, so a ``GET`` a few
+    lines above a ``POST`` of the same path does not steal the body.
+    """
     empty = {"method": "", "body_keys": []}
     if not text or not line:
         return empty
-    lines = text.splitlines()
-    idx = max(0, int(line) - 1)
-    # minified bundles put everything on one line; take the line plus a little slack
-    lo = max(0, idx - radius)
-    hi = min(len(lines), idx + radius + 1)
-    window = "\n".join(lines[lo:hi])
-
-    rm = _REQ_NEAR_RE.search(window)
-    if not rm:
-        return empty
-    paren = window.find("(", rm.end() - 1)
-    if paren == -1:
-        return empty
-    args_src, end = _balanced(window, paren, "(", ")")
-    if end == -1:
+    del radius
+    verb, args_src = _find_call(text, line, needle)
+    if not args_src and not verb:
         return empty
 
-    method = (rm.group("verb") or "").upper()
+    method = verb
     mm = _METHOD_KEY_RE.search(args_src)
     if mm:
         method = mm.group("m").upper()
@@ -213,12 +266,14 @@ def request_shape(text: str, line: int, radius: int = 2) -> dict:
             body_keys = _body_keys_from_arg(a[bm.end():], text)
             if body_keys:
                 break
-    # axios-style verb(url, {..}) with no body: wrapper -> 2nd arg object is the body
+    # axios-style / wrapper verb(url, {..}) with no body: wrapper -> 2nd arg object
     if not body_keys and method in ("POST", "PUT", "PATCH", "DELETE") and len(args) >= 2:
         second = args[1].strip()
         if second.startswith("{") and "body:" not in second and "data:" not in second \
                 and "method:" not in second:
             body_keys = object_keys(second)
+        elif _BARE_IDENT_RE.match(second):
+            body_keys = _body_keys_from_arg(second, text)
     return {"method": method, "body_keys": body_keys}
 
 

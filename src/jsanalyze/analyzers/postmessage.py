@@ -105,12 +105,28 @@ def _text_index(items) -> dict:
     return out
 
 
+# calls that are not worth entering when chasing message data into a sink
+_SKIP_CALLS = frozenset({
+    "if", "for", "while", "switch", "catch", "function", "return", "map", "filter",
+    "forEach", "join", "push", "concat", "split", "then", "catch", "String", "Object",
+    "Array", "Math", "parseInt", "setInterval", "setTimeout", "querySelector",
+    "getElementById", "addEventListener", "preventDefault",
+})
+# a property concatenated into HTML and NOT wrapped in escapeHtml( ... )
+_RAW_HTML_RE = re.compile(
+    r"""['\"][^'\"]{0,80}['\"]\s*\+\s*(?!escapeHtml\b)"""
+    r"""([A-Za-z_$][\w$]*\s*\.\s*[A-Za-z_$][\w$]*)"""
+)
+
+
 def _data_flow_signal(text: str, line) -> "str | None":
     """Does the message handler at/near ``line`` flow event.data into a sink?
 
-    Returns the sink token reached (e.g. ``innerHTML``), or None. Scans ONLY the
-    handler's own balanced ``{...}`` body (not a fixed window — that bled into the
-    next statement) and requires BOTH a ``.data`` reference and a sink token inside it."""
+    Returns the sink token reached (e.g. ``innerHTML``), or None. Scans the
+    handler's own balanced body, then up to three callees in the same file.
+    ``applyColumns(columns)`` → ``render`` → ``cellHtml`` writing
+    ``column.columnId`` into ``innerHTML`` is the case a handler-only scan misses.
+    """
     if not text or not line:
         return None
     off = _offset_of(text, int(line))
@@ -127,7 +143,47 @@ def _data_flow_signal(text: str, line) -> "str | None":
     if not data_ref:
         return None
     sm = _DATA_SINK_RE.search(body)
-    return sm.group(0).strip() if sm else None
+    if sm:
+        return sm.group(0).strip()
+    return _callee_html_sink(text, body)
+
+
+def _function_body(text: str, name: str) -> str:
+    """Balanced body of ``function name(...)`` or ``name = function(...)`` in ``text``."""
+    m = re.search(
+        r"(?:function\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{|"
+        r"\b" + re.escape(name) + r"\s*=\s*function\s*\([^)]*\)\s*\{)",
+        text,
+    )
+    if not m:
+        return ""
+    return _handler_body(text, m.end() - 1)
+
+
+def _callee_html_sink(text: str, handler_body: str) -> "str | None":
+    """innerHTML reached from the handler via same-file helpers, with a raw property concat."""
+    queue = [(n, False) for n in re.findall(r"\b([A-Za-z_$][\w$]*)\s*\(", handler_body)
+             if n not in _SKIP_CALLS]
+    seen: set = set()
+    depth = 0
+    while queue and depth < 3:
+        depth += 1
+        nxt = []
+        for name, parent_html in queue:
+            if name in seen:
+                continue
+            seen.add(name)
+            body = _function_body(text, name)
+            if not body:
+                continue
+            writes = bool(_DATA_SINK_RE.search(body)) or parent_html
+            if _RAW_HTML_RE.search(body) and writes:
+                return "innerHTML"
+            for callee in re.findall(r"\b([A-Za-z_$][\w$]*)\s*\(", body):
+                if callee not in seen and callee not in _SKIP_CALLS:
+                    nxt.append((callee, writes))
+        queue = nxt
+    return None
 
 
 def _handler_body(text: str, after: int, cap: int = 4000) -> str:

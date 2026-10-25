@@ -16,9 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from jsanalyze.analyzers.callsites import object_keys, request_shape
 from jsanalyze.analyzers.chunks import map_chunks
 from jsanalyze.analyzers.comment_miner import _CRED_RE, _INTERNAL_HOST_RE, _MOCK_PATH_RE, _scan
-from jsanalyze.analyzers.endpoints import _b64decode, _url_like, classify_endpoint
+from jsanalyze.analyzers.endpoints import (
+    _b64decode, _method_of, _url_like, classify_endpoint, normalize_endpoints,
+)
 from jsanalyze.analyzers.framework import _PROTO_LODASH_RE, _firebase_configs, _scan_gadgets
-from jsanalyze.analyzers.postmessage import _TOKENISH, _WILDCARD_TARGET, _origin_strength
+from jsanalyze.analyzers.postmessage import (
+    _TOKENISH, _WILDCARD_TARGET, _data_flow_signal, _origin_strength,
+)
 from jsanalyze.analyzers.sinks import _STRLIT_RE, _anon_param_of_sink, _enclosing_fn, _san_component
 from jsanalyze.analyzers.strings import (
     _CLIENT_DEF_RE, _build_consts, _client_base_map, _join, fold_expr,
@@ -445,6 +449,93 @@ def test_round7_direct_source():
     check("sourceless value not a direct source", direct('q.innerHTML = props.body') is None)
 
 
+def test_round8_method_body_and_message():
+    src = (
+        "function mint() {\n"
+        "    pending = fetch('/api/session/token', {\n"
+        "        method: 'POST',\n"
+        "        body: JSON.stringify({\n"
+        "            scope: 'ops.records'\n"
+        "        }),\n"
+        "    });\n"
+        "}\n"
+        "ClientApi.get('/api/links');\n"
+        "ClientApi.post('/api/links', {\n"
+        "    leftId: choice.pending.id,\n"
+        "    rightId: choice.flagged.id,\n"
+        "    note: note.value,\n"
+        "});\n"
+        "ClientApi.del('/api/links/' + encodeURIComponent(row.id));\n"
+    )
+
+    def line_of(needle):
+        return src[:src.find(needle)].count("\n") + 1
+
+    tok = request_shape(src, line_of("'/api/session/token'"), needle="/api/session/token")
+    check("multiline fetch keeps scope", tok["method"] == "POST" and tok["body_keys"] == ["scope"])
+    post = request_shape(src, line_of("ClientApi.post"), needle="/api/links")
+    check("wrapper post body",
+          post["method"] == "POST" and post["body_keys"] == ["leftId", "rightId", "note"])
+    check("Api.del is DELETE", _method_of({"type": "ClientApi.del"}) == "DELETE")
+    check("route navigation is not an API call",
+          classify_string_kind("/records/expanded", "window.open", is_route=True) == SPA_ROUTE)
+    check("fetch of a route stays an API call",
+          classify_string_kind("/records", "fetch", is_route=True) == API_CALL)
+
+    import tempfile
+    from jsanalyze.models import Item
+    body = src + "var path = '/records?focus=' + id;\nwindow.open('/records/expanded');\n"
+    with tempfile.TemporaryDirectory() as d:
+        fp = Path(d) / "app.js"
+        fp.write_text(body)
+        item = Item(url="http://localhost/app.js", saved_path=str(fp), is_javascript=True, js_body=body)
+        rows = normalize_endpoints(
+            [
+                {"url": "/api/links", "type": "ClientApi.get", "filename": str(fp)},
+                {"url": "/api/links", "type": "ClientApi.post", "filename": str(fp)},
+                {"url": "/api/links", "type": "stringLiteral", "filename": str(fp)},
+                {"url": "/api/links/EXPR", "type": "ClientApi.del", "filename": str(fp)},
+                {"url": "/note", "type": "stringLiteral", "filename": str(fp)},
+                {"url": "/api/records/EXPR/note", "type": "ClientApi.post", "filename": str(fp)},
+                {"url": "/records/expanded", "type": "window.open", "method": "GET", "filename": str(fp)},
+            ],
+            [item],
+            route_paths=["/records", "/records/expanded"],
+            history={"api_known": True, "path_keys": {("", "/api/links")},
+                     "methods": {("", "/api/links"): {"GET"}}},
+        )
+    by = {(r["method"], r["norm_path"]): r for r in rows}
+    check("GET and POST stay separate",
+          ("GET", "/api/links") in by and ("POST", "/api/links") in by)
+    check("POST was not in the GET traffic", by[("POST", "/api/links")]["seen_in_history"] is False)
+    check("POST carries the object keys",
+          by[("POST", "/api/links")]["body_keys"] == ["leftId", "rightId", "note"])
+    check("del method kept", ("DELETE", "/api/links/{id}") in by)
+    check("concat tail /note dropped", "/note" not in {r["norm_path"] for r in rows})
+    check("window.open route is not fetchable",
+          by[("GET", "/records/expanded")]["string_kind"] == "route"
+          and by[("GET", "/records/expanded")]["fetchable"] is False)
+
+    grid = (
+        "function cellHtml(column, row) {\n"
+        "    return '<td data-col-id=\"' + column.columnId + '\">' + escapeHtml(row.id) + '</td>';\n"
+        "}\n"
+        "function render() {\n"
+        "    state.body.innerHTML = state.rows.map(function (row) {\n"
+        "        return cellHtml(column, row);\n"
+        "    }).join('');\n"
+        "}\n"
+        "function applyColumns(list) { render(); }\n"
+        "window.addEventListener('message', function (event) {\n"
+        "    var message = event.data;\n"
+        "    applyColumns(message.config.defaultColumns);\n"
+        "});\n"
+    )
+    check("message columnId reaches innerHTML",
+          _data_flow_signal(grid, grid.splitlines().index(
+              "window.addEventListener('message', function (event) {") + 1) == "innerHTML")
+
+
 def main() -> int:
     for fn in (test_normalize, test_callsites, test_taint, test_taint_minified,
                test_source_tightened, test_new_sinks, test_atob, test_chunk_runtime_missing,
@@ -453,7 +544,8 @@ def main() -> int:
                test_supabase_gadget, test_vuln_call_binding, test_batch_and_multipart,
                test_round5_fp_tightening, test_round5_origin, test_round5_crossfile_and_body,
                test_round5_persisted_and_response, test_round5_money_delta, test_scoring,
-               test_round6_fixes, test_round7_direct_source):
+               test_round6_fixes, test_round7_direct_source,
+               test_round8_method_body_and_message):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

@@ -87,6 +87,9 @@ def _method_of(rec: dict) -> str:
     if m:
         return m
     t = (rec.get("type") or "").lower()
+    # `ClientApi.del` is DELETE; the substring "delete" is not in that type.
+    if t.rsplit(".", 1)[-1] == "del":
+        return "DELETE"
     for verb in ("post", "put", "patch", "delete", "get", "head"):
         if verb in t:
             return verb.upper()
@@ -148,12 +151,17 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
         # jsluice `urls` rows carry NO line, so locate the call site by the URL literal
         # in the file text, then read the options/body object there (critique point 3).
         line = rec.get("line")
-        if (not body_keys or not method) and src_file in text_by_base:
+        # a folded concat is not itself a call; reading the enclosing call
+        # would stamp POST {note} onto the shorter '/api/records/' + id piece
+        # of '/api/records/' + id + '/note'.
+        if (call_type or "").lower() != "concat" and (not body_keys or not method) and src_file in text_by_base:
             text = text_by_base[src_file]
-            loc_line = line or _locate_line(text, url, path)
+            loc_line = line or _locate_line(text, url, path, call_type)
             if loc_line:
                 line = line or loc_line                  # remember it for the lead (point 5)
-                shape2 = request_shape(text, loc_line)
+                # the path literal selects THIS call, not a GET of the same path nearby
+                needle = path.split("EXPR", 1)[0] if "EXPR" in (path or "") else (path or url)
+                shape2 = request_shape(text, loc_line, needle=needle)
                 method = method or shape2.get("method", "")
                 if not body_keys:
                     body_keys = shape2.get("body_keys", [])
@@ -185,43 +193,120 @@ def normalize_endpoints(url_records, items, cfg=None, scope_hosts=None, *,
         # endpoint whose method we could not read still matches a GET to the same path.
         if api_known and isinstance(hist_path_keys, set):
             seen = (host, npath) in hist_path_keys or ("", npath) in hist_path_keys
-            norm["seen_in_history"] = seen
             if seen and isinstance(hist_methods, dict) and method:
                 ms = hist_methods.get((host, npath)) or hist_methods.get(("", npath)) or set()
                 norm["method_in_history"] = method.upper() in ms
-        # collapse method/type variants of the same endpoint into ONE row, preferring
-        # the variant that carries an HTTP method / body (critique point 1/2 dedupe).
-        key = (norm["host"], norm["norm_path"])
+                # a POST that was never sent stays untested even when a GET of the
+                # same path is in the capture
+                if ms and method.upper() not in ms:
+                    seen = False
+            norm["seen_in_history"] = seen
+        # Same path + same method collapses (stringLiteral twin of a real call).
+        # A different method stays its own row: GET /api/links and
+        # POST /api/links are not the same surface.
+        key = (norm["host"], norm["norm_path"], norm["method"])
         prev = by_key.get(key)
         if prev is None:
             by_key[key] = norm
             order.append(key)
         else:
-            if not prev.get("method") and norm.get("method"):
-                prev["method"] = norm["method"]
             prev["call_type"] = prev["call_type"] or norm["call_type"]
-            prev["body_keys"] = prev["body_keys"] or norm["body_keys"]
-            # a real call site upgrades a bare string-literal row to API
-            if norm["string_kind"] == "api" and prev["string_kind"] != "api":
+            if norm.get("body_keys") and not prev.get("body_keys"):
+                prev["body_keys"] = norm["body_keys"]
+            elif norm.get("body_keys"):
+                prev["body_keys"] = list(dict.fromkeys(prev["body_keys"] + norm["body_keys"]))
+            # a real call site upgrades a bare string-literal row to API,
+            # but never promotes a known SPA route into an API endpoint
+            if (norm["string_kind"] == "api" and prev["string_kind"] != "api"
+                    and prev["string_kind"] != SPA_ROUTE):
                 prev["string_kind"] = "api"
-            prev["fetchable"] = prev["fetchable"] or norm["fetchable"]
+            if prev["string_kind"] != SPA_ROUTE:
+                prev["fetchable"] = prev["fetchable"] or norm["fetchable"]
             if norm.get("seen_in_history"):
                 prev["seen_in_history"] = True
-    return [by_key[k] for k in order]
+    rows = [by_key[k] for k in order]
+    rows = _drop_blank_method_twins(rows)
+    return _drop_concat_tails(rows)
 
 
-def _locate_line(text: str, url: str, path: str) -> "int | None":
+def _drop_blank_method_twins(rows: list) -> list:
+    """Drop a method-less duplicate when the same path already has a real verb.
+
+    The stringLiteral twin of ``ClientApi.get('/api/links')`` carries
+    no method. The POST of that path is a different row and must stay.
+    """
+    concrete = {(r.get("host") or "", r.get("norm_path") or "")
+                for r in rows if r.get("method")}
+    return [r for r in rows
+            if r.get("method") or (r.get("host") or "", r.get("norm_path") or "") not in concrete]
+
+
+def _drop_concat_tails(rows: list) -> list:
+    """Drop a one-segment literal that is only the tail of a concatenation.
+
+    ``'/api/records/' + id + '/note'`` is one endpoint. jsluice also emits the
+    bare string ``'/note'``, which is not its own request.
+    """
+    tails = set()
+    for r in rows:
+        npath = r.get("norm_path") or ""
+        if "/{id}/" not in npath:
+            continue
+        seg = npath.rsplit("/", 1)[-1]
+        if seg and seg != "{id}":
+            tails.add((r.get("host") or "", "/" + seg, (r.get("where_found") or "").split(":")[0]))
+    out = []
+    for r in rows:
+        segs = [s for s in (r.get("norm_path") or "").split("/") if s]
+        src = (r.get("where_found") or "").split(":")[0]
+        ct = (r.get("call_type") or "").lower()
+        if (len(segs) == 1 and r.get("string_kind") != SPA_ROUTE
+                and ct in ("stringliteral", "concat", "linkfinder", "regex", "")
+                and (r.get("host") or "", r.get("norm_path") or "", src) in tails):
+            continue
+        out.append(r)
+    return out
+
+
+def _locate_line(text: str, url: str, path: str, call_type: str = "") -> "int | None":
     """1-based line of the call that mentions this endpoint, found by the URL literal.
 
     Tries the full URL, then the path, then the static prefix before an ``EXPR``
-    placeholder (``/orders/EXPR`` -> search ``/orders/``) — enough to land request_shape
-    on the right call site when jsluice gave no line."""
+    placeholder (``/orders/EXPR`` -> search ``/orders/``). When the type names a
+    verb (``ClientApi.post``), pick the occurrence that verb actually calls —
+    the first ``'/api/links'`` in the file is often the GET."""
+    verb = (call_type or "").lower().rsplit(".", 1)[-1]
+    if verb not in ("get", "post", "put", "patch", "delete", "del", "head"):
+        verb = ""
     for needle in _locators(url, path):
         if not needle or len(needle) < 3:
             continue
-        idx = text.find(needle)
-        if idx != -1:
-            return text.count("\n", 0, idx) + 1
+        start = 0
+        fallback = None
+        while True:
+            idx = text.find(needle, start)
+            if idx == -1:
+                break
+            if fallback is None:
+                fallback = idx
+            pre = text[max(0, idx - 80):idx]
+            # the URL literal usually sits in quotes: .get('/api/...')
+            if verb and re.search(r"\." + re.escape(verb) + r"""\s*\(\s*['"`]?\s*$""", pre):
+                return text.count("\n", 0, idx) + 1
+            if not verb:
+                # "'/api/records/' + id + '/note'" is one call. The bare prefix
+                # is not its own URL, so don't read the POST's body onto it.
+                after = text[idx + len(needle):idx + len(needle) + 6]
+                # quoted needle already consumed the closing quote, so the
+                # next bytes are " +"; a bare path needle still has the quote.
+                if re.match(r"""\s*\+""", after) or re.match(r"""['"`]\s*\+""", after):
+                    start = idx + len(needle)
+                    continue
+                return text.count("\n", 0, idx) + 1
+            start = idx + len(needle)
+        if fallback is not None and verb:
+            # verb not sitting immediately before any hit; keep the first hit
+            return text.count("\n", 0, fallback) + 1
     return None
 
 

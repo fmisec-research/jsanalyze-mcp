@@ -58,6 +58,12 @@ ASSET_PREFIX = "asset"    # a static asset / module specifier
 # string literal, a comment, or a LinkFinder regex hit are as weak as "found a string" —
 # so a known SPA route must win over them (critique point 3; the /register-is-a-route case).
 _NON_CALLSITE_TYPES = {"stringliteral", "comment", "linkfinder", "regex", ""}
+# navigation, not an XHR. window.open("/records/expanded") and location = "/records?focus="
+# are routes even when jsluice stamps them method=GET. A real fetch() of the same path
+# still wins (it is not in this set).
+_NAV_CALL_TYPES = {
+    "locationassignment", "window.open", "location", "assign", "replace", "concat",
+}
 
 
 def looks_like_asset_path(path: str) -> bool:
@@ -146,6 +152,12 @@ def classify_string_kind(url: str, call_type: str, *, is_route: bool = False) ->
     u = (url or "")
     if looks_like_asset_path(u):
         return ASSET_PREFIX
+    # a path the router also registers is a route, including when the bundle only
+    # navigates there (window.open / location / a folded concat). fetch() is not
+    # navigation and still counts as an API call below.
+    if is_route and (low_ct in _NON_CALLSITE_TYPES or low_ct in _NAV_CALL_TYPES
+                     or "router" in low_ct):
+        return SPA_ROUTE
     # a GENUINE request site wins (fetch/axios/xhr/websocket/…) — but a LinkFinder/
     # stringLiteral hit is not a call site, so a known route beats it.
     if low_ct and low_ct not in _NON_CALLSITE_TYPES:
