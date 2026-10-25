@@ -10,6 +10,7 @@
     "untraced": false,
     "caller_chain": [],
     "crossfile_break": null,
+    "anon_param": null,
     "sanitizer": null,
     "redirect": false,
     "detector": "jsluice:sinks",
@@ -33,8 +34,11 @@
     "real_taint": false,
     "lead": false,
     "untraced": true,
-    "caller_chain": [],
+    "caller_chain": [
+      "e ⇐ parameter of an anonymous function (caller in another chunk, unnameable — minify limit)"
+    ],
     "crossfile_break": null,
+    "anon_param": "e",
     "sanitizer": null,
     "redirect": false,
     "detector": "jsluice:sinks",

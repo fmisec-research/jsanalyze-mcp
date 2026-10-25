@@ -1,8 +1,8 @@
-# JS Analysis — target.tld, api.target.tld (2026-10-21_example)
+# JS Analysis — target.tld, api.target.tld (2026-10-25_example)
 
 ## Ringkasan
-- JS: 4 | Endpoints: 10 fetchable/11 | Sinks: 1 lead/2 | Secrets: 5 | Vuln libs: 1 | postMessage: 1 lead/1 | Flags: 0 | Routes: 0 | Storage: 0 | GraphQL: 0 | CSP hosts: 0 | Missing chunks: 1 | Source notes: 0 | Leads: 17
-- Leads per skill: hunt-xss: 3, hunt-secrets-disclosure: 3, hunt-idor: 3, hunt-cloud: 2, hunt-auth-bypass: 2, hunt-api: 1, hunt-graphql: 1, hunt-websocket: 1, hunt-js-analysis: 1
+- JS: 4 | Endpoints: 10 fetchable/11 | Sinks: 1 lead/2 | Secrets: 5 | Vuln libs: 1 | postMessage: 1 lead/1 | Flags: 0 | Routes: 0 | Storage: 0 | GraphQL: 0 | CSP hosts: 0 | Missing chunks: 1 | Source notes: 0 | Leads: 18
+- Leads per skill: hunt-xss: 4, hunt-secrets-disclosure: 3, hunt-idor: 3, hunt-cloud: 2, hunt-auth-bypass: 2, hunt-api: 1, hunt-graphql: 1, hunt-websocket: 1, hunt-js-analysis: 1
 - Framework: jquery
 
 ## Leads prioritas
@@ -54,10 +54,14 @@
 - [lead-0015] **secret-location** score=7.3 (medium/medium → hunt-secrets-disclosure) — `{"match": "sk_t…[REDACTED]…wx", "pattern": "stripeTestKey"}` — widget.js__6738f2f709.js:4
     - experiment: Find the request in widget.js__6738f2f709.js that sends it in a key/authorization field; (Operator Gate) test it against that service.
     - neg-control: An invalid/rotated key must be rejected; only a live key grants access.
-- [lead-0016] **sourcemap** score=5.0 (low/low → hunt-js-analysis) — `https://target.tld/static/js/app.4f2a.js.map` — app.4f2a.js__6cb6251497.js:None
+- [lead-0016] **sink-untraced** score=6.0 (low/low → hunt-xss) — `document.getElementById("out").innerHTML = e.data` — app.4f2a.js__6cb6251497.js:33
+    - chain: e ⇐ parameter of an anonymous function (caller in another chunk, unnameable — minify limit)
+    - experiment: At app.4f2a.js__6cb6251497.js:33, read what feeds 'innerHTML'; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.
+    - neg-control: Not XSS unless an attacker-controlled value actually reaches this argument; a purely internal value is not a finding.
+- [lead-0017] **sourcemap** score=5.0 (low/low → hunt-js-analysis) — `https://target.tld/static/js/app.4f2a.js.map` — app.4f2a.js__6cb6251497.js:None
     - experiment: Operator-gated: if authorized, fetch 'https://target.tld/static/js/app.4f2a.js.map' and mine sourcesContent for staging hosts, mock/dummyData paths, comments and secrets not in the bundle.
     - neg-control: (recon) — a .map only yields leads if it carries sourcesContent (original comments/paths/secrets absent from the minified bundle).
-- [lead-0017] **vulnerable-library** score=2.0 (low/medium → hunt-xss) — `jquery@1.7.1 (< 1.9.0b1)` — vendor.min.js__9d94d8982f.js:None
+- [lead-0018] **vulnerable-library** score=2.0 (low/medium → hunt-xss) — `jquery@1.7.1 (< 1.9.0b1)` — vendor.min.js__9d94d8982f.js:None
     - experiment: Grep the bundle for the vulnerable jquery API; if reached by input you control, map the CVE to a concrete effect.
     - neg-control: A CVE whose vulnerable code path is never invoked is not exploitable here.
 

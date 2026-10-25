@@ -46,13 +46,36 @@ from jsanalyze.utils.normalize import history_key, looks_like_asset_path, normal
 
 __all__ = ["collect_history"]
 
-_GQL_OP_RE = re.compile(r"\b(?:query|mutation|subscription)\s+([A-Za-z_]\w*)")
-_MULTIPART_NAME_RE = re.compile(r"""name\s*=\s*["']([^"'\r\n]{1,80})["']""")
+# a GraphQL operation DEFINITION: keyword, optional name, then the variables ``(`` or the
+# selection ``{`` (round 6 pt 5). Requiring ``[({]`` means ``query{`` / ``query($id:ID!){`` are
+# recognised (anonymous — no name captured, correctly), and it no longer fires on the bare word
+# ``query`` used as a scalar field inside a document. The name group is optional and may be empty.
+_GQL_OP_RE = re.compile(r"\b(?:query|mutation|subscription)\b\s*([A-Za-z_]\w*)?\s*[({]")
+# a multipart field name lives ONLY in a part's ``Content-Disposition`` header — not in the bytes
+# of an uploaded file, which may itself contain ``name="…"`` (round 6 pt 6). ``\bname`` also stops
+# ``filename="x.html"`` being read as a field named ``x.html``.
+_CONTENT_DISP_RE = re.compile(r"Content-Disposition\s*:[^\r\n]*", re.I)
+_MULTIPART_NAME_RE = re.compile(r"""\bname\s*=\s*["']([^"'\r\n]{1,80})["']""")
 # request headers that are the replay recipe for an endpoint lead (names only; values masked)
 _AUTH_HEADERS = frozenset({
     "authorization", "x-api-key", "x-auth-token", "x-access-token", "x-csrf-token",
     "x-xsrf-token", "api-key", "authentication", "x-amz-security-token", "x-auth",
 })
+
+
+def _gql_op_names(doc: str) -> set:
+    """Named operations in a GraphQL document (anonymous ``query{…}`` contributes no name)."""
+    return {n for n in _GQL_OP_RE.findall(doc or "") if n}
+
+
+def _multipart_field_names(text: str) -> set:
+    """Field names from each part's ``Content-Disposition`` header only — never from file bytes."""
+    names: set = set()
+    for hdr in _CONTENT_DISP_RE.findall(text or ""):
+        m = _MULTIPART_NAME_RE.search(hdr)
+        if m:
+            names.add(m.group(1))
+    return names
 
 
 def _in_scope(host: str, scope_hosts) -> bool:
@@ -91,17 +114,21 @@ def _json_keys_and_gql(obj, depth: int = 2) -> "tuple[set, set]":
 
     def walk(o, d):
         if isinstance(o, dict):
-            # Apollo persisted query: a POST with only a hash, no operationName — mark it so
-            # the bundle's named ops are NOT falsely reported as "never sent" (round 5 pt 19).
+            # Apollo persisted query (APQ): the request carries a sha256 hash and USUALLY the
+            # operationName too. Match by that NAME when present (round 6 pt 8) — the reliable map
+            # is the one the traffic itself gives us, not a hash recomputed from a minified bundle.
+            # Only a truly anonymous hash-only send is unresolvable -> the `@persisted` sentinel,
+            # which now caveats (not suppresses) the delta downstream.
             if isinstance(o.get("extensions"), dict) and "persistedQuery" in o["extensions"]:
-                gql.add("@persisted")
+                op = o.get("operationName")
+                gql.add(op if isinstance(op, str) and op else "@persisted")
             if isinstance(o.get("query"), str) and (
                     "operationName" in o or "variables" in o or _GQL_OP_RE.search(o["query"])):
                 op = o.get("operationName")
                 if isinstance(op, str) and op:
                     gql.add(op)
                 else:
-                    gql.update(_GQL_OP_RE.findall(o["query"]))
+                    gql.update(_gql_op_names(o["query"]))   # not |= : that would rebind the closure var
                 if isinstance(o.get("variables"), dict):
                     for k, v in o["variables"].items():
                         bkeys.add(str(k))
@@ -156,7 +183,7 @@ def _parse_request_fields(req_bytes: bytes):
         if "query=" in qs:                               # GraphQL over GET
             qd = parse_qs(qs)
             for qv in qd.get("query", []):
-                gql.update(_GQL_OP_RE.findall(unquote(qv)))
+                gql |= _gql_op_names(unquote(qv))
             for ov in qd.get("operationName", []):
                 if ov:
                     gql.add(ov)
@@ -169,7 +196,7 @@ def _parse_request_fields(req_bytes: bytes):
             except (ValueError, TypeError):
                 pass
         elif "multipart/form-data" in ctype and text:
-            bkeys.update(_MULTIPART_NAME_RE.findall(text))
+            bkeys.update(_multipart_field_names(text))
         elif text and ("form-urlencoded" in ctype or ("=" in text and "{" not in text)):
             for kv in text.split("&"):
                 if "=" in kv:
@@ -299,7 +326,7 @@ def _har_postdata_fields(req):
                 except (ValueError, TypeError):
                     pass
             elif "multipart/form-data" in mime:
-                bkeys.update(_MULTIPART_NAME_RE.findall(t))
+                bkeys.update(_multipart_field_names(t))
             elif "form-urlencoded" in mime or ("=" in t and "{" not in t):
                 for kv in t.split("&"):
                     if "=" in kv:

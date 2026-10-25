@@ -34,7 +34,12 @@ _B64ISH_RE = re.compile(r"^[A-Za-z0-9_\-]{20,}={0,2}$")       # token-ish opaque
 # an opaque id needs ≥2 digits — so a version/namespace label like `version2` is NOT an
 # id segment and won't collapse to {id} (which would mint a false IDOR; round 5 pt 11).
 _MIXED_ID_RE = re.compile(r"^(?=(?:\D*\d){2,})[A-Za-z0-9_\-]{8,}$")
-_EXPR_RE = re.compile(r"^EXPR$|EXPR", re.I)
+# the string folder emits the literal ``EXPR`` for an unresolved dynamic segment. Match it ONLY
+# as a WHOLE segment (round 6 pt 3): the old ``…|EXPR`` branch matched the substring anywhere, so
+# a real segment ``EXPRESSION`` / ``myEXPR`` collapsed to ``{id}`` and two distinct paths merged.
+# A segment that merely CONTAINS ``EXPR`` (e.g. a half-folded ``vEXPR``) falls through to the
+# other id heuristics below instead of being force-collapsed. Case-sensitive: it is our token.
+_EXPR_RE = re.compile(r"^EXPR$")
 
 _ASSET_EXT = (
     ".js", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".scss", ".map", ".png", ".jpg",

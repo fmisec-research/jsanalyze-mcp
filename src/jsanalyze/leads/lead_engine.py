@@ -251,8 +251,12 @@ def _sink_leads(triaged, secret_files):
                        f"location/postMessage/storage (possibly via another file), build the browser "
                        f"PoC — else drop it.",
             notes=(f"party={party}; occurrences={c.get('count')}{extra}; "
-                   + (f"chain breaks at a file boundary — helper `{c.get('crossfile_break')}()` "
-                      f"is not in this capture (capture its chunk to continue the trace); "
+                   + (f"the sink uses the parameter `{c.get('anon_param')}` of an ANONYMOUS function "
+                      f"— its caller is in another chunk and cannot be named (minify limit), so the "
+                      f"trace stops here; "
+                      if c.get("anon_param")
+                      else f"chain breaks at a file boundary — helper `{c.get('crossfile_break')}()` "
+                           f"is not in this capture (capture its chunk to continue the trace); "
                       if c.get("crossfile_break") else "tracer is single-file (no cross-chunk); ")
                    + f"{len(untraced)} untraced sinks total, showing top {_UNTRACED_CAP}."),
         )
@@ -488,12 +492,15 @@ def _body_delta_leads(triaged, history, auth_hint=""):
     sent_gql = set()
     for e in sent.values():
         sent_gql.update(x.lower() for x in e.get("gql", set()))
-    # persisted queries are sent by HASH, not name — we can't match named ops to traffic, so
-    # suppress graphql-unsent entirely rather than emit false "never sent" leads (round 5 pt 19).
+    # persisted queries (APQ) are sent by hash + usually an operationName — the name is captured
+    # from traffic and lands in sent_gql above, so a named op still matches. The `@persisted`
+    # sentinel means only that at least one HASH-ONLY (anonymous) send existed that we could not
+    # name. Round 5 suppressed the WHOLE delta on that sentinel, which silenced named mutations the
+    # bundle has but never sent; now it merely CAVEATS each lead (round 6 pt 8).
     persisted = "@persisted" in sent_gql
     sent_gql.discard("@persisted")
     gql_pairs = []
-    if sent_gql and not persisted:                     # only when GraphQL was named-exercised
+    if sent_gql or persisted:                          # GraphQL exercised by name OR by hash
         for g in getattr(triaged, "graphql", []) or []:
             if g.get("party") == "third":
                 continue
@@ -509,6 +516,9 @@ def _body_delta_leads(triaged, history, auth_hint=""):
                 continue
             seen.add(key)
             anon_note = "" if name else " — anonymous op, cannot be matched to traffic by name"
+            persisted_note = (" — persisted queries (hash-only sends) were also observed; confirm "
+                              "this op's sha256 is not already registered before treating it as "
+                              "untested" if persisted else "")
             ld = Lead(
                 id="", cls="graphql-unsent", suggested_skill="hunt-graphql",
                 title=f"GraphQL {op} {display} is in the bundle but was never sent",
@@ -523,7 +533,7 @@ def _body_delta_leads(triaged, history, auth_hint=""):
                 experiment=(f"Send `{op} {display}` authenticated as B using A's id in its variables; a "
                             f"cross-account effect proves BOLA/BFLA on an untested operation."
                             + (" " + auth_hint if auth_hint else "")),
-                notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}{anon_note}.",
+                notes=f"party={g.get('party')}; sent_ops={sorted(sent_gql)[:8]}{anon_note}{persisted_note}.",
             )
             gql_pairs.append((op != "query", ld,  # mutation/subscription rank first
                               ScoreInputs(party=g.get("party", "first"), in_scope=True,

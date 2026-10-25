@@ -462,6 +462,37 @@
   },
   {
     "id": "lead-0016",
+    "title": "Untraced innerHTML [html] — argument not tied to a source",
+    "suggested_skill": "hunt-xss",
+    "source_file": "app.4f2a.js__6cb6251497.js",
+    "origin_url": null,
+    "line": 33,
+    "evidence": "document.getElementById(\"out\").innerHTML = e.data",
+    "detector": "jsluice:sinks",
+    "tainted": false,
+    "confidence": "low",
+    "severity_hint": "low",
+    "next_step": "A first-party HTML/JS sink whose input the bounded tracer could not tie to a source — confirm by hand whether attacker input reaches it (it may arrive from another chunk the tracer can't cross). (hunt-xss)",
+    "notes": "party=first; occurrences=1; the sink uses the parameter `e` of an ANONYMOUS function — its caller is in another chunk and cannot be named (minify limit), so the trace stops here; 1 untraced sinks total, showing top 5.",
+    "score": 6.0,
+    "score_factors": [
+      "sev:low=2",
+      "+first_party",
+      "+in_scope",
+      "+secret_nearby"
+    ],
+    "seen_in_history": null,
+    "caller_chain": [
+      "e ⇐ parameter of an anonymous function (caller in another chunk, unnameable — minify limit)"
+    ],
+    "body_keys": [],
+    "method": "",
+    "negative_control": "Not XSS unless an attacker-controlled value actually reaches this argument; a purely internal value is not a finding.",
+    "experiment": "At app.4f2a.js__6cb6251497.js:33, read what feeds `innerHTML`; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.",
+    "class": "sink-untraced"
+  },
+  {
+    "id": "lead-0017",
     "title": "Un-recovered sourcemap — https://target.tld/static/js/app.4f2a.js.map",
     "suggested_skill": "hunt-js-analysis",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -489,7 +520,7 @@
     "class": "sourcemap"
   },
   {
-    "id": "lead-0017",
+    "id": "lead-0018",
     "title": "jquery 1.7.1 — CVE-2012-6708, CVE-2015-9251, CVE-2019-11358, CVE-2020-11023 …",
     "suggested_skill": "hunt-xss",
     "source_file": "vendor.min.js__9d94d8982f.js",

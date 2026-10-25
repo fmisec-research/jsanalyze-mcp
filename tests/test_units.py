@@ -15,17 +15,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from jsanalyze.analyzers.callsites import object_keys, request_shape
 from jsanalyze.analyzers.chunks import map_chunks
-from jsanalyze.analyzers.comment_miner import _CRED_RE, _INTERNAL_HOST_RE, _scan
+from jsanalyze.analyzers.comment_miner import _CRED_RE, _INTERNAL_HOST_RE, _MOCK_PATH_RE, _scan
 from jsanalyze.analyzers.endpoints import _b64decode, _url_like, classify_endpoint
 from jsanalyze.analyzers.framework import _PROTO_LODASH_RE, _firebase_configs, _scan_gadgets
-from jsanalyze.analyzers.postmessage import _TOKENISH, _origin_strength
-from jsanalyze.analyzers.sinks import _enclosing_fn, _san_component
-from jsanalyze.analyzers.strings import _build_consts, _client_base_map, _join, fold_expr
-from jsanalyze.analyzers.taint import backtrace, discover_html_sinks, sink_arg_idents, source_label
+from jsanalyze.analyzers.postmessage import _TOKENISH, _WILDCARD_TARGET, _origin_strength
+from jsanalyze.analyzers.sinks import _anon_param_of_sink, _enclosing_fn, _san_component
+from jsanalyze.analyzers.strings import (
+    _CLIENT_DEF_RE, _build_consts, _client_base_map, _join, fold_expr,
+)
+from jsanalyze.analyzers.taint import (
+    _definition_rhs, _rhs_slice, backtrace, discover_html_sinks, sink_arg_idents, source_label,
+)
 from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads, _vuln_sink_leads
 from jsanalyze.leads.scoring import ScoreInputs, score_lead
 from jsanalyze.models import Lead, Triaged
-from jsanalyze.parsers.history import _json_keys_and_gql, _parse_request_fields
+from jsanalyze.parsers.history import (
+    _gql_op_names, _json_keys_and_gql, _multipart_field_names, _parse_request_fields,
+)
 from jsanalyze.parsers.responses import _SENSITIVE_KEY_RE, _flatten
 from jsanalyze.utils.normalize import normalize_path as _np
 from jsanalyze.utils.normalize import (
@@ -348,6 +354,77 @@ def test_scoring():
     check("not-in-history boosts", "+not_in_history" in fu)
 
 
+def test_round6_fixes():
+    # 1) taint RHS is read with balanced brackets, so a comma INSIDE a call no longer truncates it
+    check("rhs keeps comma-in-parens", _rhs_slice("foo(a, location.hash);", 0) == "foo(a, location.hash)")
+    check("multi-declarator RHS split", _definition_rhs("var a = 1, b = location.hash;", "a")[0] == "1")
+    lab, _c = backtrace("var t = foo(a, location.hash); x.innerHTML = t;", ["t"], before=40)
+    check("taint via 2nd call arg traced", lab == "location.hash")
+
+    # 2) mock-path keeps strong markers only; ordinary filenames are not leads
+    check("sample.js is not a mock path", not _MOCK_PATH_RE.search("/data/sample.js"))
+    check("seed/stub not mock paths",
+          not _MOCK_PATH_RE.search("/x/seed.ts") and not _MOCK_PATH_RE.search("/x/stub.js"))
+    check("mock/dummy/fixture still mock",
+          bool(_MOCK_PATH_RE.search("/mockData/u.json")) and bool(_MOCK_PATH_RE.search("/fixtures/a.yml")))
+
+    # 3) EXPR collapses to {id} only as a WHOLE segment; a real EXPRESSION/myEXPR must not merge
+    check("whole EXPR -> {id}", normalize_path("/orders/EXPR") == "/orders/{id}")
+    check("EXPRESSION stays distinct", normalize_path("/api/EXPRESSION/x") == "/api/expression/x")
+    check("myEXPR stays distinct", normalize_path("/a/myEXPR") == "/a/myexpr")
+
+    # 4) only a real client ctor binds a baseURL — a bare foo({uri}) does not
+    check("foo({uri}) is not a client", not _CLIENT_DEF_RE.search('const c = foo({ uri: "/x" })'))
+    check("axios.create is a client", bool(_CLIENT_DEF_RE.search('const c = axios.create({ baseURL:"/a" })')))
+    check("new ApolloClient is a client", bool(_CLIENT_DEF_RE.search('const c = new ApolloClient({ uri:"/g" })')))
+
+    # 5) GraphQL op regex: anonymous ops have no name; a field named `query` is not an op
+    check("anonymous query{ has no name", _gql_op_names("query{ me }") == set())
+    check("query($id){ anon has no name", _gql_op_names("query($id:ID!){ me }") == set())
+    check("named op extracted", _gql_op_names("query GetX($id:ID!){ x }") == {"GetX"})
+    check("field named query not an op", _gql_op_names("query GetX { user { query manual } }") == {"GetX"})
+
+    # 6) multipart field names come ONLY from Content-Disposition headers, not file bytes
+    mp = ('Content-Disposition: form-data; name="role"\r\n\r\n<b name="evil">\r\n'
+          'Content-Disposition: form-data; name="file"; filename="x.html"\r\n')
+    check("multipart reads only CD-header names", _multipart_field_names(mp) == {"role", "file"})
+
+    # 7) wildcard postMessage target: backtick + options-object forms, no stray-"*" false hit
+    check("backtick wildcard target", bool(_WILDCARD_TARGET.search("w.postMessage(d, `*`)")))
+    check("object targetOrigin wildcard", bool(_WILDCARD_TARGET.search("w.postMessage(d, { targetOrigin: '*' })")))
+    check("3-arg wildcard target", bool(_WILDCARD_TARGET.search('w.postMessage(d, "*", t)')))
+    check("select(\"*\") is not a target", not _WILDCARD_TARGET.search('q.select("*")'))
+
+    # 8) a persisted (APQ) send with an operationName matches by NAME, not the @persisted sentinel
+    _b, g = _json_keys_and_gql({"operationName": "GetUser", "variables": {"id": 1},
+                                "extensions": {"persistedQuery": {"sha256Hash": "h"}}})
+    check("persisted+name matched by name", g == {"GetUser"})
+    _b, g2 = _json_keys_and_gql({"extensions": {"persistedQuery": {"sha256Hash": "h"}}})
+    check("hash-only persisted still @persisted", g2 == {"@persisted"})
+    # the delta is no longer silenced by a persisted send: a named mutation never sent is surfaced
+    tri = Triaged(
+        graphql=[{"operation": "mutation", "operationName": "DeleteUser", "variables": ["$id"],
+                  "file": "a.js", "party": "first"}],
+    )
+    hist = {"sent": {("", "/graphql"): {"body": set(), "query": set(), "gql": {"@persisted", "GetUser"}}}}
+    pairs = _body_delta_leads(tri, hist)
+    gl = [ld for ld, _ in pairs if ld.cls == "graphql-unsent"]
+    check("persisted no longer suppresses named-mutation delta", bool(gl))
+    check("persisted caveat present on the lead", gl and "persisted queries" in gl[0].notes)
+
+    # 9) a sink using an anonymous function's parameter is recorded (not silent)
+    txt = "arr.forEach(function (e) { node.innerHTML = e });"
+    check("anon-fn parameter detected", _anon_param_of_sink(txt, txt.index("innerHTML"), ["e"]) == "e")
+    check("non-param not falsely anon", _anon_param_of_sink(txt, txt.index("innerHTML"), ["z"]) is None)
+    anon_cl = {"sink_class": "html", "kind": "innerHTML", "party": "first", "untraced": True,
+               "real_taint": False, "lead": False, "anon_param": "e", "crossfile_break": None,
+               "caller_chain": ["e ⇐ parameter of an anonymous function (minify limit)"], "count": 1,
+               "occurrences": [{"file": "app.js", "line": 10, "source": "node.innerHTML = e"}]}
+    aut = [ld for ld, _ in _sink_leads(Triaged(sinks=[anon_cl]), set()) if ld.cls == "sink-untraced"]
+    check("anon-fn sink surfaced, not silent", bool(aut))
+    check("anon-fn sink note explains the break", aut and "ANONYMOUS function" in aut[0].notes)
+
+
 def main() -> int:
     for fn in (test_normalize, test_callsites, test_taint, test_taint_minified,
                test_source_tightened, test_new_sinks, test_atob, test_chunk_runtime_missing,
@@ -355,7 +432,8 @@ def main() -> int:
                test_body_delta, test_untraced_cap, test_baseurl_join_and_guard,
                test_supabase_gadget, test_vuln_call_binding, test_batch_and_multipart,
                test_round5_fp_tightening, test_round5_origin, test_round5_crossfile_and_body,
-               test_round5_persisted_and_response, test_round5_money_delta, test_scoring):
+               test_round5_persisted_and_response, test_round5_money_delta, test_scoring,
+               test_round6_fixes):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

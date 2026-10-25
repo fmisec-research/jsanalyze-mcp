@@ -38,7 +38,10 @@ _INTERNAL_HOST_RE = re.compile(
     r"sandbox|local|admin)(?=[.\-\d])[\w.\-]*\.[a-z]{2,}"
     r"|[\w.\-]+\.(?:internal|local|corp|intranet|test)\b)",
     re.I)
-_MOCK_PATH_RE = re.compile(r"\b[\w./\-]*(?:mock|dummy|fixture|sample|seed|stub|fake)[\w./\-]*"
+# only STRONG test-data markers — `sample`/`seed`/`stub`/`fake` are ordinary filenames
+# (`sample.js`, `seed.ts`, `stub.js`) and minted a mock-path lead for every one (round 6 pt 2);
+# keep `mock`/`dummy`/`fixture` (covers `dummyData`, `mocks`, `fixtures`).
+_MOCK_PATH_RE = re.compile(r"\b[\w./\-]*(?:mock|dummy|fixture)[\w./\-]*"
                            r"(?:data|s)?[\w./\-]*\.(?:json|js|ts|yaml|yml)\b", re.I)
 
 _SECRETY = re.compile(r"(password|secret|api[_\-]?key|bearer|token|credential|apikey)", re.I)

@@ -20,9 +20,15 @@ import re
 __all__ = ["resolve_string_endpoints", "fold_expr"]
 
 # a client bound to a baseURL:  const c = axios.create({ … })  |  new ApolloClient({ uri })
+# the constructor is now REQUIRED and specific (round 6 pt 4): it was optional, so
+# ``const c = foo({ uri: "/x" })`` bound ANY call and ``c.get("/admin")`` became ``/x/admin``.
+# Only a real HTTP/GraphQL client ctor — ``<ident>.create`` (axios) or ``new <…>Client`` (Apollo/
+# GraphQL/Http) — followed by an options object literal qualifies.
 _CLIENT_DEF_RE = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
-    r"(?:[A-Za-z_$][\w$.]*\s*\.\s*create|new\s+[A-Za-z_$][\w$.]*)?\s*\(\s*\{")
+    r"(?:[A-Za-z_$][\w$]*\s*\.\s*create"
+    r"|new\s+(?:[A-Za-z_$][\w$.]*)?Client)"
+    r"\s*\(\s*\{")
 # narrowed keys — `host`/`endpoint` were too generic (round 5 pt 9); `uri` kept for ApolloClient
 _BASEURL_RE = re.compile(
     r"""\b(?:baseURL|baseUrl|basePath|apiHost|apiBase|apiUrl|uri)\s*:\s*"""

@@ -186,6 +186,34 @@ def _enclosing_fn(text: str, pos: int) -> "tuple[str, list] | None":
     return best
 
 
+# an ANONYMOUS function header — no name to resolve a call site by (a hard minify limit):
+#   function (p){…}  |  function* (p){…}  |  (p)=>{…}  |  p=>{…}  (callbacks, IIFEs)
+_ANON_FN_RE = re.compile(
+    r"function\s*\*?\s*\((?P<pa>[^)]*)\)\s*\{"
+    r"|(?<![\w$)\]])\(\s*(?P<pb>[^)]*)\)\s*=>\s*\{"
+    r"|(?<![\w$.])(?P<ps>[A-Za-z_$][\w$]*)\s*=>\s*\{")
+
+
+def _anon_param_of_sink(text: str, pos: int, sink_ids) -> "str | None":
+    """If the sink at ``pos`` sits inside an ANONYMOUS function and uses one of its parameters,
+    return that parameter (round 6 pt 9). Its caller cannot be named across chunks, so the lead
+    SAYS "anonymous function" instead of going silent — ``function (e){node.innerHTML=e}`` reached
+    only from ``ye(location.hash)`` in another chunk is a real break, not an absence of a sink."""
+    best = None
+    for m in _ANON_FN_RE.finditer(text):
+        if m.start() > pos:
+            break
+        br = m.end() - 1                       # the '{' the header ends on
+        end = _balanced(text, br)
+        if end != -1 and br < pos <= end:
+            praw = m.group("pa") or m.group("pb") or m.group("ps") or ""
+            params = [p.strip().split("=")[0].strip() for p in praw.split(",") if p.strip()]
+            hit = next((i for i in sink_ids if i in params), None)
+            if hit:
+                best = hit                     # innermost (latest start) enclosing anon fn wins
+    return best
+
+
 def _fn_call_args(items) -> dict:
     """Run-wide index {fname: [(basefile, first_arg_expr)]} — the call sites of named
     functions across every file (the CALLER side of a cross-file taint, round 4 pt 2)."""
@@ -334,6 +362,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         chain: list = []
         untraced = False
         crossfile_break = None
+        anon_param = None
 
         # pass 2: bounded backward trace when jsluice saw no direct taint
         if not real and sink_class in ("html", "js", "attr", "url"):
@@ -382,10 +411,11 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
             # function ye(e){node.innerHTML=e}  (file A) ;  ye(location.hash)  (file B).
             if untraced:
                 self_text = text_by_base.get(src_file, "")
+                off = _sink_offset(self_text, source, rec.get("pos"), rec.get("line")) or 0
                 sink_ids = (_root_idents(arg_expr) if arg_expr else []) or sink_arg_idents(kind, source)
-                encl = _enclosing_fn(self_text, _sink_offset(self_text, source, rec.get("pos"),
-                                                             rec.get("line")) or 0) if self_text else None
-                if encl and any(i in encl[1] for i in sink_ids):
+                encl = _enclosing_fn(self_text, off) if self_text else None
+                named_owns = bool(encl and encl[0] and any(i in encl[1] for i in sink_ids))
+                if named_owns:
                     fname = encl[0]
                     callsites = fn_call_args.get(fname) or []
                     if callsites:
@@ -403,6 +433,17 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                                 break
                     else:
                         crossfile_break = crossfile_break or fname
+                # still unresolved and NO named function owns the param, but the sink uses a param of
+                # an ANONYMOUS function? Then the caller lives in another chunk and cannot be named
+                # (minify limit) — record it so the sink-untraced lead explains the break rather than
+                # vanishing (round 6 pt 9). `not named_owns` keeps a NAMED arrow (`const f=e=>{…}`)
+                # attributed to its helper name, never mislabelled anonymous.
+                if untraced and not real and self_text and not named_owns:
+                    ap = _anon_param_of_sink(self_text, off, sink_ids)
+                    if ap:
+                        anon_param = ap
+                        chain = chain + [f"{ap} ⇐ parameter of an anonymous function "
+                                         f"(caller in another chunk, unnameable — minify limit)"]
 
         key = _signature(kind, sink_class, source, real)
         occ = {"file": src_file, "line": rec.get("line"), "source": " ".join(source.split())[:200]}
@@ -416,7 +457,7 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
                 "sink_class": sink_class, "kind": kind, "party": party,
                 "tainted": tainted, "taint_source": taint_source, "real_taint": real,
                 "lead": lead, "untraced": untraced and not real,
-                "caller_chain": chain, "crossfile_break": crossfile_break,
+                "caller_chain": chain, "crossfile_break": crossfile_break, "anon_param": anon_param,
                 "sanitizer": _san_component(source),
                 # a tainted url-class sink with no javascript:/data: scheme is an open redirect
                 "redirect": sink_class == "url" and real and not _JS_SCHEME_RE.search(source),
@@ -429,6 +470,10 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         cl["count"] += 1
         if chain and not cl.get("caller_chain"):
             cl["caller_chain"] = chain
+        if crossfile_break and not cl.get("crossfile_break"):
+            cl["crossfile_break"] = crossfile_break    # a later occurrence may find the broken hop
+        if anon_param and not cl.get("anon_param"):
+            cl["anon_param"] = anon_param
         if taint_source and not cl.get("taint_source"):
             cl["taint_source"] = taint_source
         if len(cl["occurrences"]) < 10:

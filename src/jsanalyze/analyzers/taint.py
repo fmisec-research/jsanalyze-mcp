@@ -185,28 +185,65 @@ def backtrace(text: str, idents, max_hops: int = 4,
     return None, chain
 
 
+def _rhs_slice(text: str, start: int, cap: int = 400) -> str:
+    """The right-hand side of an assignment that begins at ``start``, read with balanced
+    ``()[]{}`` and string awareness.
+
+    A comma inside a call/array/object/string must NOT truncate the RHS (round 6 pt 1): the
+    blunt ``[^;\\n,]`` cut lost the real taint in ``t = foo(a, location.hash)`` (it kept only
+    ``foo(a``). We instead stop at a depth-0 ``;`` / newline / comma — the boundary of the next
+    declarator or statement — or at a closing bracket that belongs to an ENCLOSING group, or the
+    cap. The depth-0 comma stop still protects a multi-declarator ``var a = 1, b = location.hash``
+    (``a``'s RHS is ``1``, not the whole line), which is exactly why round 5 kept the truncation —
+    balanced scanning gives both."""
+    depth, j, n, q = 0, start, min(len(text), start + cap), ""
+    while j < n:
+        ch = text[j]
+        if q:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == q:
+                q = ""
+            j += 1
+            continue
+        if ch in "\"'`":
+            q = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:                       # closes a group that STARTED before the RHS — stop
+                break
+            depth -= 1
+        elif depth == 0 and ch in ";,\n":
+            break                                # next declarator / statement boundary
+        j += 1
+    return text[start:j].strip()
+
+
 def _definition_rhs(text: str, name: str,
                     before: "int | None" = None) -> "tuple[str | None, int | None]":
     """RHS (and start offset) of the ``[var|let|const] name = <rhs>`` assignment nearest
     *before* ``before``; the first in the file when ``before`` is None. Returns
     ``(None, None)`` if the only definitions sit at/after the sink."""
-    # a single '=' ONLY — never ==/===/!=/<=/>= (a comparison is not an assignment; round 5 pt 1)
-    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=(?![=])\s*([^;\n,]{1,300})")
-    chosen = None
+    # a single '=' ONLY — never ==/===/!=/<=/>= (a comparison is not an assignment; round 5 pt 1).
+    # The RHS itself is sliced with balanced-bracket awareness, not a comma cut (round 6 pt 1).
+    rx = re.compile(r"(?:\b(?:var|let|const)\s+)?\b" + re.escape(name) + r"\s*=(?![=])\s*")
+    chosen_start = None
+    chosen_rhs = None
     for m in rx.finditer(text):
-        rhs = m.group(1).strip()
-        if re.match(r"^" + re.escape(name) + r"\b", rhs):
-            continue                             # self-reference (name = name.foo) — skip
+        rhs = _rhs_slice(text, m.end())
+        if not rhs or re.match(r"^" + re.escape(name) + r"\b", rhs):
+            continue                             # empty, or self-reference (name = name.foo) — skip
         if before is None:
-            chosen = m
-            break                                # first definition (whole-file fallback)
+            return rhs, m.start()                # first definition (whole-file fallback)
         if m.start() < before:
-            chosen = m                           # keep the LATEST one preceding the sink
+            chosen_start, chosen_rhs = m.start(), rhs   # keep the LATEST one preceding the sink
         else:
             break                                # reached/passed the sink: later defs can't taint it
-    if chosen is None:
+    if chosen_rhs is None:
         return None, None
-    return chosen.group(1).strip(), chosen.start()
+    return chosen_rhs, chosen_start
 
 
 def _param_binding(text: str, name: str) -> "str | None":

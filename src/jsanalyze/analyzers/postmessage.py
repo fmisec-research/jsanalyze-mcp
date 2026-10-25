@@ -42,7 +42,15 @@ _STRONG_ORIGIN = re.compile(
 _TOKENISH = re.compile(
     r"\b(?:token|jwt|bearer|secret|credential|oauth|auth|session|apikey|api[_-]?key"
     r"|access[_-]?token|id[_-]?token|refresh[_-]?token)\b|[A-Za-z]+Token\b", re.IGNORECASE)
-_WILDCARD_TARGET = re.compile(r"postMessage\s*\([^;]*?,\s*(['\"])\*\1\s*\)", re.IGNORECASE)
+# a wildcard target origin on a postMessage SEND (round 6 pt 7) — all three cover the forms that
+# slipped past the old `postMessage(…, "*")`-only regex + the over-broad `'"*"' in source` fallback
+# (which matched any stray `"*"`): the target arg as "*", '*' or `*`, and the options-object form
+# { targetOrigin: "*" }. The payload may contain ';'/',' — detection keys off the FINAL target arg
+# (before ')' or the next ',') rather than scanning the payload.
+_WILDCARD_TARGET = re.compile(
+    r",\s*(['\"`])\s*\*\s*\1\s*[),]"                     # … , "*" )  |  '*'  |  `*`  (2nd/3rd arg)
+    r"|targetOrigin\s*:\s*(['\"`])\s*\*\s*\2",           # { targetOrigin: "*" | '*' | `*` }
+    re.IGNORECASE)
 
 # a sink the handler's event.data can reach (critique point 7) — if the handler body
 # flows the message data into one of these, a no-origin-check listener is a real lead
@@ -218,7 +226,7 @@ def classify_postmessage(pm_records, items, cfg=None, scope_hosts=None) -> list[
                         severity_hint="info", confidence="low")
 
         elif kind == "postMessageSend":
-            wildcard = bool(_WILDCARD_TARGET.search(source)) or '"*"' in source or "'*'" in source
+            wildcard = bool(_WILDCARD_TARGET.search(source))
             tokenish = bool(_TOKENISH.search(source))
             base.update(
                 pm_class="postmessage-sender", wildcard_target=wildcard,
