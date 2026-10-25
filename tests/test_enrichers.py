@@ -55,6 +55,13 @@ def main() -> int:
         # the tainted innerHTML is the sink lead
         assert any(l["class"] == "xss-sink" and "location.hash" in (l.get("evidence") or "")
                    for l in leads)
+        # round 7: a message-handler `e.data` flowing to innerHTML is recovered as a REAL xss-sink
+        # (the `.data` property is no longer dropped to the bare ident `e`), not under-classified
+        assert any(l["class"] == "xss-sink" and "e.data" in (l.get("evidence") or "")
+                   for l in leads), "e.data message-handler sink not recovered as xss-sink"
+        # ...while a genuinely sourceless sink (panel.js `innerHTML = props.body`) stays a low
+        # sink-untraced AUDIT lead — the tracer discloses its bound rather than faking taint
+        assert any(l["class"] == "sink-untraced" for l in leads), "untraced audit sink missing"
 
         # sinks.json keeps audit clusters, most NOT leads
         sinks = json.loads((run_dir / "sinks.json").read_text())

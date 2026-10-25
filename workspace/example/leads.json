@@ -32,6 +32,39 @@
   },
   {
     "id": "lead-0002",
+    "title": "DOM-XSS innerHTML [html] tainted by e.data",
+    "suggested_skill": "hunt-xss",
+    "source_file": "app.4f2a.js__6cb6251497.js",
+    "origin_url": null,
+    "line": 33,
+    "evidence": "document.getElementById(\"out\").innerHTML = e.data",
+    "detector": "jsluice:sinks",
+    "tainted": true,
+    "confidence": "high",
+    "severity_hint": "high",
+    "next_step": "In a browser, drive attacker-controlled input into this sink and capture execution (dialog or DOM marker). A reflection is not proof. (hunt-xss)",
+    "notes": "party=first; occurrences=1.",
+    "score": 10.6,
+    "score_factors": [
+      "sev:high=4",
+      "+conf:high",
+      "+first_party",
+      "+in_scope",
+      "+tainted",
+      "+secret_nearby"
+    ],
+    "seen_in_history": null,
+    "caller_chain": [
+      "e.data"
+    ],
+    "body_keys": [],
+    "method": "",
+    "negative_control": "A benign value in the same source must NOT execute; only the attacker-controlled payload does.",
+    "experiment": "In a browser, set the tainted source (e.data) to a JS payload and confirm execution (dialog/DOM marker) at app.4f2a.js__6cb6251497.js:33.",
+    "class": "xss-sink"
+  },
+  {
+    "id": "lead-0003",
     "title": "bfla-candidate — POST /api/admin/users/promote",
     "suggested_skill": "hunt-api",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -64,7 +97,7 @@
     "class": "bfla-candidate"
   },
   {
-    "id": "lead-0003",
+    "id": "lead-0004",
     "title": "postmessage-listener (addEventListener)",
     "suggested_skill": "hunt-xss",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -96,7 +129,7 @@
     "class": "postmessage-listener"
   },
   {
-    "id": "lead-0004",
+    "id": "lead-0005",
     "title": "Client-side secret (AWSAccessKey)",
     "suggested_skill": "hunt-cloud",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -126,7 +159,7 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0005",
+    "id": "lead-0006",
     "title": "Client-side secret (stripeSecretKey)",
     "suggested_skill": "hunt-secrets-disclosure",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -156,7 +189,7 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0006",
+    "id": "lead-0007",
     "title": "Client-side secret (githubKey)",
     "suggested_skill": "hunt-secrets-disclosure",
     "source_file": "vendor.min.js__9d94d8982f.js",
@@ -186,7 +219,7 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0007",
+    "id": "lead-0008",
     "title": "idor-candidate — GET EXPR/users/EXPR/orders/123",
     "suggested_skill": "hunt-idor",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -217,7 +250,7 @@
     "class": "idor-candidate"
   },
   {
-    "id": "lead-0008",
+    "id": "lead-0009",
     "title": "idor-candidate — GET /v1/users/EXPR/orders/123",
     "suggested_skill": "hunt-idor",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -248,7 +281,7 @@
     "class": "idor-candidate"
   },
   {
-    "id": "lead-0009",
+    "id": "lead-0010",
     "title": "auth-endpoint — POST /api/v1/auth/reset-password",
     "suggested_skill": "hunt-auth-bypass",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -281,7 +314,7 @@
     "class": "auth-endpoint"
   },
   {
-    "id": "lead-0010",
+    "id": "lead-0011",
     "title": "auth-endpoint — POST /api/v1/auth/login",
     "suggested_skill": "hunt-auth-bypass",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -311,7 +344,7 @@
     "class": "auth-endpoint"
   },
   {
-    "id": "lead-0011",
+    "id": "lead-0012",
     "title": "graphql-candidate — POST /graphql",
     "suggested_skill": "hunt-graphql",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -341,7 +374,7 @@
     "class": "graphql-candidate"
   },
   {
-    "id": "lead-0012",
+    "id": "lead-0013",
     "title": "idor-candidate — GET /api/v0/legacy/export",
     "suggested_skill": "hunt-idor",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -371,7 +404,7 @@
     "class": "idor-candidate"
   },
   {
-    "id": "lead-0013",
+    "id": "lead-0014",
     "title": "websocket — GET /socket",
     "suggested_skill": "hunt-websocket",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -401,7 +434,7 @@
     "class": "websocket"
   },
   {
-    "id": "lead-0014",
+    "id": "lead-0015",
     "title": "Client-side secret (gcpKey)",
     "suggested_skill": "hunt-cloud",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -431,7 +464,7 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0015",
+    "id": "lead-0016",
     "title": "Client-side secret (stripeTestKey)",
     "suggested_skill": "hunt-secrets-disclosure",
     "source_file": "widget.js__6738f2f709.js",
@@ -461,38 +494,37 @@
     "class": "secret-location"
   },
   {
-    "id": "lead-0016",
+    "id": "lead-0017",
     "title": "Untraced innerHTML [html] — argument not tied to a source",
     "suggested_skill": "hunt-xss",
-    "source_file": "app.4f2a.js__6cb6251497.js",
+    "source_file": "panel.js__f78056bc40.js",
     "origin_url": null,
-    "line": 33,
-    "evidence": "document.getElementById(\"out\").innerHTML = e.data",
+    "line": 5,
+    "evidence": "document.querySelector(\"#panel\").innerHTML = h",
     "detector": "jsluice:sinks",
     "tainted": false,
     "confidence": "low",
     "severity_hint": "low",
     "next_step": "A first-party HTML/JS sink whose input the bounded tracer could not tie to a source — confirm by hand whether attacker input reaches it (it may arrive from another chunk the tracer can't cross). (hunt-xss)",
-    "notes": "party=first; occurrences=1; the sink uses the parameter `e` of an ANONYMOUS function — its caller is in another chunk and cannot be named (minify limit), so the trace stops here; 1 untraced sinks total, showing top 5.",
-    "score": 6.0,
+    "notes": "party=first; occurrences=1; tracer is single-file (no cross-chunk); 1 untraced sinks total, showing top 5.",
+    "score": 5.0,
     "score_factors": [
       "sev:low=2",
       "+first_party",
-      "+in_scope",
-      "+secret_nearby"
+      "+in_scope"
     ],
     "seen_in_history": null,
     "caller_chain": [
-      "e ⇐ parameter of an anonymous function (caller in another chunk, unnameable — minify limit)"
+      "h = props.body"
     ],
     "body_keys": [],
     "method": "",
     "negative_control": "Not XSS unless an attacker-controlled value actually reaches this argument; a purely internal value is not a finding.",
-    "experiment": "At app.4f2a.js__6cb6251497.js:33, read what feeds `innerHTML`; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.",
+    "experiment": "At panel.js__f78056bc40.js:5, read what feeds `innerHTML`; if it is reachable from location/postMessage/storage (possibly via another file), build the browser PoC — else drop it.",
     "class": "sink-untraced"
   },
   {
-    "id": "lead-0017",
+    "id": "lead-0018",
     "title": "Un-recovered sourcemap — https://target.tld/static/js/app.4f2a.js.map",
     "suggested_skill": "hunt-js-analysis",
     "source_file": "app.4f2a.js__6cb6251497.js",
@@ -520,7 +552,7 @@
     "class": "sourcemap"
   },
   {
-    "id": "lead-0018",
+    "id": "lead-0019",
     "title": "jquery 1.7.1 — CVE-2012-6708, CVE-2015-9251, CVE-2019-11358, CVE-2020-11023 …",
     "suggested_skill": "hunt-xss",
     "source_file": "vendor.min.js__9d94d8982f.js",

@@ -1,6 +1,6 @@
 {
   "known": true,
-  "count": 4,
+  "count": 5,
   "hosts": [
     "target.tld"
   ],
@@ -32,6 +32,13 @@
       "path": "/",
       "norm": "/",
       "asset": false
+    },
+    {
+      "method": "GET",
+      "host": "target.tld",
+      "path": "/static/js/panel.js",
+      "norm": "/static/js/panel.js",
+      "asset": true
     }
   ]
 }

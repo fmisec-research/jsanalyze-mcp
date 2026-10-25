@@ -19,12 +19,13 @@ from jsanalyze.analyzers.comment_miner import _CRED_RE, _INTERNAL_HOST_RE, _MOCK
 from jsanalyze.analyzers.endpoints import _b64decode, _url_like, classify_endpoint
 from jsanalyze.analyzers.framework import _PROTO_LODASH_RE, _firebase_configs, _scan_gadgets
 from jsanalyze.analyzers.postmessage import _TOKENISH, _WILDCARD_TARGET, _origin_strength
-from jsanalyze.analyzers.sinks import _anon_param_of_sink, _enclosing_fn, _san_component
+from jsanalyze.analyzers.sinks import _STRLIT_RE, _anon_param_of_sink, _enclosing_fn, _san_component
 from jsanalyze.analyzers.strings import (
     _CLIENT_DEF_RE, _build_consts, _client_base_map, _join, fold_expr,
 )
 from jsanalyze.analyzers.taint import (
-    _definition_rhs, _rhs_slice, backtrace, discover_html_sinks, sink_arg_idents, source_label,
+    _arg_expr, _definition_rhs, _rhs_slice, backtrace, discover_html_sinks, sink_arg_idents,
+    source_label,
 )
 from jsanalyze.leads.lead_engine import _body_delta_leads, _sink_leads, _vuln_sink_leads
 from jsanalyze.leads.scoring import ScoreInputs, score_lead
@@ -425,6 +426,25 @@ def test_round6_fixes():
     check("anon-fn sink note explains the break", aut and "ANONYMOUS function" in aut[0].notes)
 
 
+def test_round7_direct_source():
+    # a jsluice sink carries no arg_expr, so pass-2 recovers the RHS and checks it for a source
+    # BEFORE reducing to root idents — a property-tailed source like `e.data` is no longer dropped
+    # to the bare `e` (round 7). `addEventListener("message", e => innerHTML = e.data)` is a real
+    # DOM-XSS, not an untraced/anonymous break.
+    def direct(src):                                    # mirrors the pass-2 direct check exactly
+        return source_label(_STRLIT_RE.sub(" ", _arg_expr("innerHTML", src)))
+    check("e.data recovered as a source", direct('q.innerHTML = e.data') == "e.data")
+    check("location.hash still direct", direct('el.innerHTML = location.hash') == "location.hash")
+    # a plain-string literal containing a source token is NOT a source (stripped first)
+    check("source token inside a string is not a source",
+          direct('q.innerHTML = "please visit location.href now"') is None)
+    # a template literal INTERPOLATING a source still counts (backticks are not stripped)
+    check("templated source still detected",
+          direct('q.innerHTML = `pre ${location.hash} post`') == "location.hash")
+    # a genuinely sourceless value stays untraced (so panel.js-style sinks remain audit, not leads)
+    check("sourceless value not a direct source", direct('q.innerHTML = props.body') is None)
+
+
 def main() -> int:
     for fn in (test_normalize, test_callsites, test_taint, test_taint_minified,
                test_source_tightened, test_new_sinks, test_atob, test_chunk_runtime_missing,
@@ -433,7 +453,7 @@ def main() -> int:
                test_supabase_gadget, test_vuln_call_binding, test_batch_and_multipart,
                test_round5_fp_tightening, test_round5_origin, test_round5_crossfile_and_body,
                test_round5_persisted_and_response, test_round5_money_delta, test_scoring,
-               test_round6_fixes):
+               test_round6_fixes, test_round7_direct_source):
         fn()
     for n in _passed:
         print(f"  ✓ {n}")

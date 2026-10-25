@@ -67,4 +67,20 @@
     <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IHRleHQvaHRtbDsgY2hhcnNldD11dGYtOA0KU2VydmVyOiBuZ2lueA0KQ29udGVudC1MZW5ndGg6IDgwDQoNCjwhZG9jdHlwZSBodG1sPjxodG1sPjxoZWFkPjx0aXRsZT5UYXJnZXQ8L3RpdGxlPjwvaGVhZD48Ym9keT5oZWxsbzwvYm9keT48L2h0bWw+</response>
     <comment></comment>
   </item>
+  <item>
+    <time>Fri Oct 17 10:00:00 GMT 2026</time>
+    <url><![CDATA[https://target.tld/static/js/panel.js]]></url>
+    <host ip="203.0.113.10">target.tld</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method><![CDATA[GET]]></method>
+    <path><![CDATA[/static/js/panel.js]]></path>
+    <extension>js</extension>
+    <request base64="true">R0VUIC9zdGF0aWMvanMvcGFuZWwuanMgSFRUUC8xLjENCkhvc3Q6IHRhcmdldC50bGQNCkFjY2VwdDogKi8qDQoNCg==</request>
+    <status>200</status>
+    <responselength>376</responselength>
+    <mimetype>script</mimetype>
+    <response base64="true">SFRUUC8xLjEgMjAwIE9LDQpDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2phdmFzY3JpcHQ7IGNoYXJzZXQ9dXRmLTgNClNlcnZlcjogbmdpbngNCkNvbnRlbnQtTGVuZ3RoOiAyNjgNCg0KKGZ1bmN0aW9uICgpIHsKICAvLyBwYW5lbCBjb250ZW50IGlzIGFzc2VtYmxlZCBpbiBhbm90aGVyIGNodW5rOyB0aGUgdHJhY2VyIHNlZXMgdGhlIGhvcCAoaCA9IHByb3BzLmJvZHkpCiAgLy8gYnV0IG5vdCB3aGVyZSBgcHJvcHNgIG9yaWdpbmF0ZXMgLT4gYSBnZW51aW5lIHNpbmdsZS1maWxlIHVudHJhY2VkIGF1ZGl0IHNpbmsuCiAgdmFyIGggPSBwcm9wcy5ib2R5OwogIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoIiNwYW5lbCIpLmlubmVySFRNTCA9IGg7Cn0pKCk7Cg==</response>
+    <comment></comment>
+  </item>
 </items>

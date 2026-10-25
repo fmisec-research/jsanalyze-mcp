@@ -30,15 +30,43 @@
     "kind": "innerHTML",
     "party": "first",
     "tainted": false,
+    "taint_source": "e.data",
+    "real_taint": true,
+    "lead": true,
+    "untraced": false,
+    "caller_chain": [
+      "e.data"
+    ],
+    "crossfile_break": null,
+    "anon_param": null,
+    "sanitizer": null,
+    "redirect": false,
+    "detector": "jsluice:sinks",
+    "severity_hint": "high",
+    "confidence": "high",
+    "count": 1,
+    "occurrences": [
+      {
+        "file": "app.4f2a.js__6cb6251497.js",
+        "line": 33,
+        "source": "document.getElementById(\"out\").innerHTML = e.data"
+      }
+    ]
+  },
+  {
+    "sink_class": "html",
+    "kind": "innerHTML",
+    "party": "first",
+    "tainted": false,
     "taint_source": null,
     "real_taint": false,
     "lead": false,
     "untraced": true,
     "caller_chain": [
-      "e ⇐ parameter of an anonymous function (caller in another chunk, unnameable — minify limit)"
+      "h = props.body"
     ],
     "crossfile_break": null,
-    "anon_param": "e",
+    "anon_param": null,
     "sanitizer": null,
     "redirect": false,
     "detector": "jsluice:sinks",
@@ -47,9 +75,9 @@
     "count": 1,
     "occurrences": [
       {
-        "file": "app.4f2a.js__6cb6251497.js",
-        "line": 33,
-        "source": "document.getElementById(\"out\").innerHTML = e.data"
+        "file": "panel.js__f78056bc40.js",
+        "line": 5,
+        "source": "document.querySelector(\"#panel\").innerHTML = h"
       }
     ]
   }

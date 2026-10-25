@@ -23,9 +23,15 @@ import os
 import re
 
 from jsanalyze.analyzers.taint import (
-    backtrace, discover_html_sinks, sink_arg_idents, source_label, _root_idents,
+    backtrace, discover_html_sinks, sink_arg_idents, source_label, _arg_expr, _root_idents,
 )
 from jsanalyze.party import party_of
+
+# strip PLAIN string literals from an expression so a source token that appears inside a quoted
+# string (``innerHTML = "visit location.href"``) is not mistaken for a real source. Backticks are
+# left intact on purpose: a template literal can INTERPOLATE a real source (`` `${location.hash}` ``),
+# which must still be detected.
+_STRLIT_RE = re.compile(r"""(['"])(?:\\.|(?!\1).)*\1""")
 
 _SINK_CLASS = {
     "innerHTML": "html", "outerHTML": "html", "dangerouslySetInnerHTML": "html",
@@ -367,12 +373,18 @@ def triage_sinks(sink_records, items, cfg=None, scope_hosts=None) -> list[dict]:
         # pass 2: bounded backward trace when jsluice saw no direct taint
         if not real and sink_class in ("html", "js", "attr", "url"):
             arg_expr = rec.get("arg_expr") or ""
-            # the argument expression may itself BE a source (``parseFromString(location.search)``)
-            # — check it directly before reducing to root idents (which would drop the property).
-            direct = source_label(arg_expr) if arg_expr else None
+            # the argument expression may itself BE a source (``parseFromString(location.search)``,
+            # or a message handler's ``e.data``) — check the FULL expression before reducing to root
+            # idents, which drops the property tail (``e.data`` -> bare ``e``, no longer a source).
+            # A jsluice sink carries no arg_expr, so recover it from the source text (round 7): an
+            # ``addEventListener("message", e => out.innerHTML = e.data)`` is a real DOM-XSS, not an
+            # untraced/anonymous break. Plain string literals are stripped first so a source token
+            # inside a quoted string is not a false positive.
+            probe = arg_expr or _arg_expr(kind, source)
+            direct = source_label(_STRLIT_RE.sub(" ", probe)) if probe else None
             if direct and (sink_class != "url" or any(tok in direct.lower() for tok in _INJECTABLE)):
                 real, taint_source = True, direct
-                chain = [arg_expr.strip()]
+                chain = [probe.strip()]
             else:
                 idents = (_root_idents(arg_expr) if arg_expr else []) \
                     or sink_arg_idents(kind, source)
